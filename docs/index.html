@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PrinterStatusGuard · 打印机状态守护 / Printer Status Guard</title>
+<meta name="description" content="免安装单文件 Windows 工具，把打印机卡纸、缺纸、缺墨状态主动推到桌面通知。Portable single-file Windows utility that surfaces printer jam / empty paper / low toner as desktop notifications.">
+<link rel="alternate" hreflang="zh-CN" href="index.html?lang=zh">
+<link rel="alternate" hreflang="en" href="index.html?lang=en">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232563eb'/%3E%3Cpath d='M9 11h14v7h-14z' fill='white'/%3E%3Crect x='12' y='7' width='8' height='4' rx='1' fill='white' opacity='.85'/%3E%3Crect x='11' y='20' width='10' height='6' rx='1' fill='white' opacity='.7'/%3E%3C/svg%3E">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#f6f9fd; --card:#ffffff; --ink:#0f1d33; --muted:#5b6b85;
+  --blue:#2563eb; --blue-dark:#1d4ed8; --blue-soft:#e8f0ff;
+  --green:#16a34a; --amber:#d97706; --line:#e3ebf7;
+}
+html{scroll-padding-top:76px}
+body{
+  font-family:"Segoe UI","Microsoft YaHei UI","PingFang SC","Hiragino Sans GB",-apple-system,sans-serif;
+  background:var(--bg); color:var(--ink); line-height:1.7; -webkit-font-smoothing:antialiased;
+}
+/* ---- bilingual: Chinese is default; English shown when body.en ---- */
+[data-lang-en]{display:none}
+body.en [data-lang-en]{display:inline}
+body.en [data-lang-zh]{display:none}
+.pill,[data-lang-en].pill{display:inline-block}
+body.en [data-lang-en].pill{display:inline-block}
+.wrap{max-width:1080px;margin:0 auto;padding:0 22px}
+a{color:var(--blue);text-decoration:none}
+a:hover{text-decoration:underline}
+
+/* ---- nav ---- */
+.nav{position:sticky;top:0;z-index:50;background:rgba(255,255,255,.92);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+.nav-in{display:flex;align-items:center;gap:18px;height:64px}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:17px;color:var(--ink)}
+.brand:hover{text-decoration:none}
+.nav-links{display:flex;gap:20px;margin-left:auto;align-items:center}
+.nav-links a{color:var(--muted);font-size:14px;font-weight:500}
+.nav-links a:hover{color:var(--blue)}
+.langbtn{border:1px solid var(--line);background:#fff;border-radius:8px;padding:5px 11px;font-size:12px;font-weight:700;color:var(--blue);cursor:pointer}
+.langbtn:hover{border-color:var(--blue)}
+
+/* ---- hero ---- */
+.hero{padding:56px 0 44px;background:linear-gradient(180deg,#eaf2ff 0%,var(--bg) 100%);border-bottom:1px solid var(--line)}
+.hero-in{display:flex;gap:40px;align-items:center;flex-wrap:wrap}
+.hero-txt{flex:1 1 420px;min-width:300px}
+h1{font-size:38px;line-height:1.25;letter-spacing:-.5px;margin-bottom:14px}
+h1 .sub{display:block;font-size:20px;color:var(--blue);font-weight:600;margin-top:6px}
+.lede{font-size:16px;color:var(--muted);margin-bottom:20px}
+.badges{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:24px}
+.pill{background:var(--blue-soft);color:var(--blue-dark);border-radius:999px;padding:5px 13px;font-size:12.5px;font-weight:600}
+.cta{display:flex;gap:12px;flex-wrap:wrap}
+.btn{display:inline-block;padding:12px 22px;border-radius:10px;font-weight:700;font-size:15px;border:2px solid transparent;transition:.15s}
+.btn:hover{text-decoration:none;transform:translateY(-1px)}
+.btn-p{background:var(--blue);color:#fff;box-shadow:0 6px 18px rgba(37,99,235,.28)}
+.btn-p:hover{background:var(--blue-dark)}
+.btn-s{background:#fff;color:var(--blue);border-color:#c9dcfb}
+
+/* ---- sections ---- */
+section{padding:52px 0}
+section.alt{background:#fff;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+h2{font-size:27px;margin-bottom:8px;letter-spacing:-.3px}
+.sec-lede{color:var(--muted);margin-bottom:26px;max-width:760px}
+
+/* cards */
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:18px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:22px}
+.card h3{font-size:17px;margin-bottom:8px;display:flex;align-items:center;gap:9px}
+.card p{color:var(--muted);font-size:14.5px}
+.tag{font-size:11px;font-weight:700;padding:3px 9px;border-radius:6px;background:var(--blue-soft);color:var(--blue-dark)}
+.tag.a{background:#dcfce7;color:#15803d}
+.tag.b{background:#fef3c7;color:#b45309}
+
+/* routes */
+.routes{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:20px}
+.route{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:24px;position:relative;overflow:hidden}
+.route::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--blue)}
+.route.a::before{background:var(--green)}
+.route.b::before{background:var(--amber)}
+.route h3{font-size:19px;margin:6px 0 10px}
+.route ul{margin:12px 0 0 18px;color:var(--muted);font-size:14.5px}
+.route li{margin-bottom:6px}
+.note{background:#f1f6ff;border-left:3px solid var(--blue);padding:12px 15px;border-radius:8px;font-size:14px;color:#334;margin-top:18px}
+
+/* steps */
+.steps{counter-reset:s;display:grid;gap:14px;margin-top:8px}
+.step{display:flex;gap:14px;align-items:flex-start;background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+.step .n{flex:0 0 28px;height:28px;border-radius:8px;background:var(--blue);color:#fff;font-weight:700;font-size:14px;display:flex;align-items:center;justify-content:center}
+
+/* table-ish */
+.kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
+.kv div{background:#fff;border:1px solid var(--line);border-radius:11px;padding:15px 17px}
+.kv b{display:block;font-size:14px;margin-bottom:3px}
+.kv span{font-size:13.5px;color:var(--muted)}
+
+footer{background:#0f1d33;color:#9fb2cf;padding:34px 0;font-size:14px}
+footer .wrap{display:flex;gap:16px;flex-wrap:wrap;justify-content:space-between;align-items:center}
+footer a{color:#cfe0ff}
+
+@media(max-width:640px){
+  h1{font-size:29px}
+  .hero{padding:38px 0 30px}
+  .nav-links a:not(.lg){display:none}
+}
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <div class="wrap nav-in">
+    <a class="brand" href="index.html">
+      <svg width="26" height="26" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#2563eb"/><path d="M9 12h14v6H9z" fill="#fff"/><rect x="12" y="8" width="8" height="4" rx="1" fill="#fff" opacity=".85"/><rect x="11" y="20" width="10" height="5" rx="1" fill="#fff" opacity=".7"/></svg>
+      PrinterStatusGuard
+    </a>
+    <div class="nav-links">
+      <a href="#routes"><span data-lang-zh>两条路线</span><span data-lang-en>Routes</span></a>
+      <a href="#features"><span data-lang-zh>功能</span><span data-lang-en>Features</span></a>
+      <a href="#usage"><span data-lang-zh>用法</span><span data-lang-en>Usage</span></a>
+      <a class="lg" href="https://github.com/DC1024/PrinterStatusGuard">GitHub</a>
+      <button class="langbtn" id="langToggle" type="button">
+        <span data-lang-zh>EN</span><span data-lang-en>中文</span>
+      </button>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap hero-in">
+    <div class="hero-txt">
+      <h1>
+        <span data-lang-zh>打印机状态守护</span><span data-lang-en>Printer Status Guard</span>
+        <span class="sub">
+          <span data-lang-zh>让 Windows 不再对卡纸、缺纸、缺墨「装哑巴」</span>
+          <span data-lang-en>Stop Windows from staying silent about jams, empty trays and low toner</span>
+        </span>
+      </h1>
+      <p class="lede">
+        <span data-lang-zh>一个<strong>免安装、单文件</strong>的 Windows 小工具，把打印机的真实状态主动推送到你的桌面通知。两条互补路线：一条治本（启用端口 SNMP，让系统原生显示），一条兜底（常驻哨兵轮询 IPP，异常立刻弹通知）。</span>
+        <span data-lang-en>A <strong>portable, single-file</strong> Windows utility that pushes real printer status to your desktop. Two complementary routes: fix it at the source (enable port SNMP so Windows shows status natively), and fall back to a resident sentinel that polls IPP and fires a notification on any anomaly.</span>
+      </p>
+      <div class="badges">
+        <span class="pill"><span data-lang-zh>免安装</span><span data-lang-en>No install</span></span>
+        <span class="pill"><span data-lang-zh>单文件 exe</span><span data-lang-en>Single .exe</span></span>
+        <span class="pill"><span data-lang-zh>Windows 10 / 11</span><span data-lang-en>Windows 10 / 11</span></span>
+        <span class="pill"><span data-lang-zh>MIT 许可</span><span data-lang-en>MIT License</span></span>
+        <span class="pill"><span data-lang-zh>零外部依赖</span><span data-lang-en>Zero dependencies</span></span>
+      </div>
+      <div class="cta">
+        <a class="btn btn-p" href="https://github.com/DC1024/PrinterStatusGuard/releases/latest/download/PrinterStatusGuard.exe">
+          <span data-lang-zh>下载 PrinterStatusGuard.exe</span><span data-lang-en>Download PrinterStatusGuard.exe</span>
+        </a>
+        <a class="btn btn-s" href="https://github.com/DC1024/PrinterStatusGuard">
+          <span data-lang-zh>查看源码</span><span data-lang-en>View source</span>
+        </a>
+      </div>
+    </div>
+    <svg width="300" height="230" viewBox="0 0 300 230" aria-hidden="true" style="flex:0 0 auto">
+      <defs>
+        <linearGradient id="g1" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#3b82f6"/><stop offset="1" stop-color="#1d4ed8"/>
+        </linearGradient>
+      </defs>
+      <!-- printer body -->
+      <rect x="70" y="96" width="150" height="72" rx="10" fill="url(#g1)"/>
+      <rect x="96" y="72" width="76" height="26" rx="5" fill="#93c5fd"/>
+      <rect x="96" y="72" width="18" height="26" rx="4" fill="#fff" opacity=".9"/>
+      <rect x="128" y="72" width="44" height="26" rx="4" fill="#fff" opacity=".55"/>
+      <rect x="92" y="150" width="104" height="8" rx="4" fill="#dbeafe"/>
+      <circle cx="196" cy="120" r="5" fill="#86efac"/>
+      <!-- output paper -->
+      <path d="M104 118h96v34h-96z" fill="#fff" opacity=".95"/>
+      <path d="M114 130h58M114 140h40" stroke="#cbd5e1" stroke-width="3" stroke-linecap="round"/>
+      <!-- shield badge -->
+      <g transform="translate(206,58)">
+        <path d="M22 0 44 7v20c0 14-13 24-22 28C13 51 0 41 0 27V7z" fill="#16a34a"/>
+        <path d="M10 25l9 9 16-17" stroke="#fff" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      </g>
+      <!-- notification toast -->
+      <g transform="translate(16,24)">
+        <rect x="0" y="0" width="176" height="52" rx="10" fill="#fff" stroke="#e3ebf7" stroke-width="2"/>
+        <circle cx="26" cy="26" r="12" fill="#fee2e2"/>
+        <path d="M26 19v14M26 37v.5" stroke="#dc2626" stroke-width="4" stroke-linecap="round"/>
+        <rect x="48" y="16" width="88" height="7" rx="3.5" fill="#1e293b"/>
+        <rect x="48" y="30" width="62" height="7" rx="3.5" fill="#94a3b8"/>
+      </g>
+      <path d="M104 92c0-14 10-24 24-26" stroke="#2563eb" stroke-width="2" stroke-dasharray="4 5" fill="none" opacity=".55"/>
+    </svg>
+  </div>
+</header>
+
+<section>
+  <div class="wrap">
+    <h2><span data-lang-zh>为什么需要它</span><span data-lang-en>Why it exists</span></h2>
+    <p class="sec-lede">
+      <span data-lang-zh>打印机卡纸、缺纸时，Windows 默认经常毫无提示——打印任务悄悄卡住，你走到打印机前才发现。这台机器上我们实测过：那台 Pantum 的 Windows 原生两条状态通道（SNMP、WSD）都用不了，<code>DetectedErrorState</code> 恒为 0。本工具不依赖它们，直接自己问打印机。</span>
+      <span data-lang-en>When a printer jams or runs out of paper, Windows often says nothing — jobs stall silently and you only discover it by walking over. On the very machine this was built for, both native Windows status channels (SNMP and WSD) were unusable and <code>DetectedErrorState</code> stayed 0. This tool asks the printer directly instead.</span>
+    </p>
+  </div>
+</section>
+
+<section class="alt" id="routes">
+  <div class="wrap">
+    <h2><span data-lang-zh>两条互补的路线</span><span data-lang-en>Two complementary routes</span></h2>
+    <p class="sec-lede">
+      <span data-lang-zh>路线 A 让系统自己能显示状态；路线 B 在系统看不到的时候，依然主动告诉你。</span>
+      <span data-lang-en>Route A makes Windows itself show the status; Route B keeps telling you even when the OS cannot see it.</span>
+    </p>
+    <div class="routes">
+      <div class="route a">
+        <span class="tag a"><span data-lang-zh>路线 A · 治本</span><span data-lang-en>Route A · Root fix</span></span>
+        <h3><span data-lang-zh>启用端口 SNMP</span><span data-lang-en>Enable port SNMP</span></h3>
+        <p><span data-lang-zh>给打印机的「标准 TCP/IP 端口」打开 SNMP 并重启后台打印服务。开启后，Windows 原生就能在设备和打印机里显示缺纸 / 缺墨，无需任何第三方软件常驻。</span><span data-lang-en>Turn on SNMP for the printer's Standard TCP/IP Port and restart the Print Spooler. Windows then shows paper / toner status natively in Devices and Printers — nothing needs to stay resident.</span></p>
+        <ul>
+          <li><span data-lang-zh>写入注册表端口键（SNMP Enabled / Community / Index）</span><span data-lang-en>Writes the port registry keys (SNMP Enabled / Community / Index)</span></li>
+          <li><span data-lang-zh>需要管理员权限，工具会弹 UAC 提权</span><span data-lang-en>Requires admin; the tool raises a UAC prompt</span></li>
+          <li><span data-lang-zh>一次性操作，做完即生效</span><span data-lang-en>One-shot action, takes effect immediately</span></li>
+        </ul>
+        <div class="note"><span data-lang-zh>⚠️ SNMP（RFC 2790）覆盖进纸盘空 / 耗材缺失，但<strong>没有卡纸位</strong>——这正是路线 B 存在的理由。</span><span data-lang-en>⚠️ SNMP (RFC 2790) covers empty trays and missing supplies, but has <strong>no jam bit</strong> — which is exactly why Route B exists.</span></div>
+      </div>
+      <div class="route b">
+        <span class="tag b"><span data-lang-zh>路线 B · 兜底</span><span data-lang-en>Route B · Fallback</span></span>
+        <h3><span data-lang-zh>IPP 哨兵 + SNMP 交叉确认</span><span data-lang-en>IPP sentinel + SNMP cross-check</span></h3>
+        <p><span data-lang-zh>常驻托盘（可开机自启），定时向打印机 631 端口发 IPP 请求，解析 <code>printer-state-reasons</code>；同时读取 SNMP 错误位做交叉确认，两路合并后判定严重度。</span><span data-lang-en>Stays in the tray (optional auto-start) and periodically sends IPP requests to port 631, parsing <code>printer-state-reasons</code>; it also reads SNMP error bits as a cross-check, then merges both channels to decide severity.</span></p>
+        <ul>
+          <li><span data-lang-zh>Toast 通知优先，失败自动回退托盘气泡</span><span data-lang-en>Toast notifications first, falling back to tray balloons</span></li>
+          <li><span data-lang-zh>普通用户权限即可，无需提权</span><span data-lang-en>Works at standard user level, no elevation</span></li>
+          <li><span data-lang-zh>轮询间隔可调，开机自启可选</span><span data-lang-en>Adjustable poll interval, optional auto-start</span></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="features">
+  <div class="wrap">
+    <h2><span data-lang-zh>关键能力</span><span data-lang-en>Key capabilities</span></h2>
+    <p class="sec-lede">
+      <span data-lang-zh>不止是"能弹通知"——真正花力气的是让它<b>不误报、不漏报、不刷屏</b>。</span>
+      <span data-lang-en>Not just "it can notify" — the hard part was making it <b>not false-alarm, not miss events, and not spam you</b>.</span>
+    </p>
+    <div class="grid">
+      <div class="card">
+        <h3><span data-lang-zh>迟滞防抖</span><span data-lang-en>Hysteresis (debounce)</span></h3>
+        <p><span data-lang-zh>扫描、打印、休眠唤醒会让打印机短暂不响应。异常<strong>立即</strong>上报并去重；而「离线」与「已恢复」都要求<strong>连续 3 次</strong>轮询稳定才通知。所以每扫一次文件就刷一串"恢复正常"的日子结束了。</span><span data-lang-en>Scanning, printing and sleep make the printer briefly unreachable. Anomalies <strong>fire instantly</strong> (and are de-duplicated), while "offline" and "recovered" each require <strong>3 consecutive</strong> stable polls. No more floods of "recovered" after every scan.</span></p>
+      </div>
+      <div class="card">
+        <h3><span data-lang-zh>双通道合并</span><span data-lang-en>Merged channels</span></h3>
+        <p><span data-lang-zh>IPP 与 SNMP 结果合并判定：任一通道报卡纸 / 缺纸 / 耗材相关位即判 Critical，其余告警判 Warning。既不漏报，也不会两条线路各弹一次。</span><span data-lang-en>IPP and SNMP results are merged: a jam / empty paper / supply bit from either channel is Critical, other alerts are Warning. Nothing is missed and nothing is double-reported.</span></p>
+      </div>
+      <div class="card">
+        <h3><span data-lang-zh>卡纸识别</span><span data-lang-en>Jam detection</span></h3>
+        <p><span data-lang-zh><code>media-jam</code> / <code>paper-jam</code> 映射为「卡纸」并判 Critical，走最高级别通知。厂商自定义 SNMP 位也不会被丢掉，会按 Warning 浮出。</span><span data-lang-en><code>media-jam</code> / <code>paper-jam</code> map to "jam" at Critical severity for highest-priority alerts. Vendor-specific SNMP bits are never dropped either — they surface as Warning.</span></p>
+      </div>
+      <div class="card">
+        <h3><span data-lang-zh>日志诊断 Tab</span><span data-lang-en>Diagnostics log tab</span></h3>
+        <p><span data-lang-zh>记录工具与打印机的每一次交互：IPP 原始原因、SNMP 原始位域、合并结果、通知触发。支持 全部 / Info / Warning / Error 等级筛选，可清空、可打开日志目录。</span><span data-lang-en>Records every interaction: raw IPP reasons, raw SNMP bit fields, the merged verdict, and notification triggers. Filter by All / Info / Warning / Error, clear, or open the log folder.</span></p>
+      </div>
+      <div class="card">
+        <h3><span data-lang-zh>自检模式</span><span data-lang-en>Self-test mode</span></h3>
+        <p><span data-lang-zh>无需界面即可验证核心逻辑：<code>PrinterStatusGuard.exe -SelfTest</code>，23 个用例覆盖 IPP 解析、SNMP 位域解码、双通道合并、迟滞防抖、注册表路径构造。</span><span data-lang-en>Verify the core logic headlessly with <code>PrinterStatusGuard.exe -SelfTest</code> — 23 cases covering IPP parsing, SNMP bit-field decoding, channel merging, hysteresis and registry path construction.</span></p>
+      </div>
+      <div class="card">
+        <h3><span data-lang-zh>真正免安装</span><span data-lang-en>Truly portable</span></h3>
+        <p><span data-lang-zh>单个 exe，放到任意目录双击即用；不写系统目录（除可选的开机自启注册表项），配置落在 <code>%APPDATA%</code>，卸载就是删文件。IPP 与 SNMP 客户端均为纯 .NET 实现。</span><span data-lang-en>A single exe you can drop anywhere and double-click. It writes nothing to system folders (except an optional auto-start entry), keeps config in <code>%APPDATA%</code>, and uninstalling means deleting the file. The IPP and SNMP clients are pure .NET.</span></p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="alt" id="usage">
+  <div class="wrap">
+    <h2><span data-lang-zh>怎么用</span><span data-lang-en>How to use</span></h2>
+    <div class="steps">
+      <div class="step"><div class="n">1</div><div>
+        <span data-lang-zh>下载 exe 双击运行（或运行 <code>.cmd</code> 启动器，它会优先找 exe）。</span>
+        <span data-lang-en>Download the exe and run it (or run the <code>.cmd</code> launcher, which prefers the exe).</span>
+      </div></div>
+      <div class="step"><div class="n">2</div><div>
+        <span data-lang-zh><b>路线 A</b>：选中打印机的 TCP/IP 端口 →「启用选中端口 SNMP」（需管理员）。</span>
+        <span data-lang-en><b>Route A</b>: select the printer's TCP/IP port → "Enable SNMP" (requires admin).</span>
+      </div></div>
+      <div class="step"><div class="n">3</div><div>
+        <span data-lang-zh><b>路线 B</b>：点「添加当前网络打印机」→ 设置轮询间隔 → 「开始哨兵」。可勾选开机自启。</span>
+        <span data-lang-en><b>Route B</b>: click "Add current network printers" → set the interval → "Start sentinel". Auto-start is optional.</span>
+      </div></div>
+      <div class="step"><div class="n">4</div><div>
+        <span data-lang-zh>关闭主窗口会最小化到托盘；需要更新 exe 时请先从托盘右键<b>退出</b>，否则文件被占用无法覆盖。</span>
+        <span data-lang-en>Closing the window only minimizes to the tray. Before replacing the exe, right-click the tray icon and <b>exit</b>, otherwise the file stays locked.</span>
+      </div></div>
+    </div>
+    <div class="note">
+      <span data-lang-zh>📌 拿到打印机 IP 后如果想手动确认通道是否可用：浏览器打开 <code>http://&lt;打印机IP&gt;:631</code> 能通说明 IPP 可用。</span>
+      <span data-lang-en>📌 To confirm the channel manually: if <code>http://&lt;printer-IP&gt;:631</code> opens in a browser, IPP is available.</span>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2><span data-lang-zh>运行要求与权限</span><span data-lang-en>Requirements &amp; permissions</span></h2>
+    <div class="kv">
+      <div><b><span data-lang-zh>系统</span><span data-lang-en>System</span></b><span><span data-lang-zh>Windows 10 / 11，含 .NET Framework 4.x</span><span data-lang-en>Windows 10 / 11 with .NET Framework 4.x</span></span></div>
+      <div><b><span data-lang-zh>运行时</span><span data-lang-en>Runtime</span></b><span><span data-lang-zh>Windows PowerShell 5.1（系统自带）</span><span data-lang-en>Windows PowerShell 5.1 (built in)</span></span></div>
+      <div><b><span data-lang-zh>路线 A 权限</span><span data-lang-en>Route A permission</span></b><span><span data-lang-zh>管理员（写注册表 + 重启 Spooler）</span><span data-lang-en>Admin (writes registry + restarts Spooler)</span></span></div>
+      <div><b><span data-lang-zh>路线 B 权限</span><span data-lang-en>Route B permission</span></b><span><span data-lang-zh>普通用户即可，仅发网络请求</span><span data-lang-en>Standard user; network requests only</span></span></div>
+      <div><b><span data-lang-zh>配置位置</span><span data-lang-en>Config location</span></b><span><span data-lang-zh>%APPDATA%\PrinterStatusGuard\</span><span data-lang-en>%APPDATA%\PrinterStatusGuard\</span></span></div>
+      <div><b><span data-lang-zh>数据收集</span><span data-lang-en>Data collection</span></b><span><span data-lang-zh>不收集任何数据，全部本地处理</span><span data-lang-en>Collects nothing; everything stays local</span></span></div>
+    </div>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap" style="text-align:center">
+    <h2><span data-lang-zh>开始守护你的打印机</span><span data-lang-en>Start guarding your printer</span></h2>
+    <p class="sec-lede" style="margin:0 auto 22px">
+      <span data-lang-zh>免安装、MIT 许可、开源。下载单个 exe 即可使用。</span>
+      <span data-lang-en>Portable, MIT-licensed and open source. Download a single exe and go.</span>
+    </p>
+    <div class="cta" style="justify-content:center">
+      <a class="btn btn-p" href="https://github.com/DC1024/PrinterStatusGuard/releases/latest/download/PrinterStatusGuard.exe">
+        <span data-lang-zh>下载最新版</span><span data-lang-en>Download latest</span>
+      </a>
+      <a class="btn btn-s" href="https://github.com/DC1024/PrinterStatusGuard/releases">
+        <span data-lang-zh>全部发布版本</span><span data-lang-en>All releases</span>
+      </a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div>PrinterStatusGuard · <span data-lang-zh>打印机状态守护</span><span data-lang-en>Printer Status Guard</span></div>
+    <div><span data-lang-zh>MIT 许可</span><span data-lang-en>MIT License</span> · <a href="https://github.com/DC1024/PrinterStatusGuard">GitHub</a> · <a href="https://github.com/DC1024/PrinterStatusGuard/issues">Issues</a></div>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var params = new URLSearchParams(location.search);
+  var lang = params.get('lang');
+  function setLang(next) {
+    document.body.classList.toggle('en', next === 'en');
+    document.documentElement.lang = next === 'en' ? 'en' : 'zh-CN';
+  }
+  setLang(lang === 'en' ? 'en' : 'zh');
+  var btn = document.getElementById('langToggle');
+  btn.addEventListener('click', function () {
+    var next = document.body.classList.contains('en') ? 'zh' : 'en';
+    setLang(next);
+    // keep URL shareable without persisting to localStorage
+    var u = new URL(location.href);
+    u.searchParams.set('lang', next);
+    history.replaceState(null, '', u.toString());
+  });
+})();
+</script>
+</body>
+</html>
