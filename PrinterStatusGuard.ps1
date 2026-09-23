@@ -567,7 +567,7 @@ function Send-Notification {
 }
 
 # ===================== 纯逻辑：哨兵一轮巡检 =====================
-# 通知防抖（迟滞）：异常立即上报（用户希望看到）；但「离线」与「已恢复」必须连续 2 次轮询稳定才上报，
+# 通知防抖（迟滞）：异常立即上报（用户希望看到）；但「离线」与「已恢复」必须连续 3 次轮询稳定才上报，
 # 避免打印机 IPP/SNMP 抖动（瞬时超时、单轮毛刺）造成「恢复」通知刷屏。
 $script:PollState = $null
 
@@ -735,7 +735,7 @@ if ($SelfTest) {
     ST '合并 全正常 -> OK' ($m3.Sev -eq 'OK' -and $m3.Issues.Count -eq 0)
     $m4 = Merge-PrinterStatus -StateInfo @{ Text = '空闲'; Sev = 'OK' } -FriendlyReasons @(@{ Text = '正常'; Sev = 'OK' }) -SnmpBits @('bit 2.3')
     ST '合并 厂商自定义位 -> Warning(不漏报)' ($m4.Sev -eq 'Warning' -and $m4.Text -eq 'bit 2.3')
-    # 4d) 通知防抖（迟滞）逻辑：异常去重、恢复需连续2次、抖动不刷屏
+    # 4d) 通知防抖（迟滞）逻辑：异常去重、恢复需连续3次、抖动不刷屏
     $script:PollState = @{}
     $ft = [pscustomobject]@{ Ip = '10.0.0.1'; Name = '测试机' }
     $ev = New-Object System.Collections.ArrayList
