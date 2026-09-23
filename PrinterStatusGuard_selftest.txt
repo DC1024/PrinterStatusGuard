@@ -6,7 +6,20 @@
 [OK  ] IPP 解析 printer-state-reasons=none 
 [OK  ] SNMP 解码 ErrStatus=0 
 [OK  ] SNMP 解码 value=5 (int) 
+[OK  ] SNMP 解码 hrPrinterDetectedErrorState(OCTET STRING) 
+[OK  ] SNMP 位域 0x04 -> 定影器过热 
+[OK  ] SNMP 位域 多bit 解码 
+[OK  ] 合并 正常+过热 -> Warning 
+[OK  ] 合并 卡纸 -> Critical 
+[OK  ] 合并 全正常 -> OK 
+[OK  ] 合并 厂商自定义位 -> Warning(不漏报) 
+[OK  ] 防抖 异常只报一次(去重) 
+[OK  ] 防抖 恢复需连续3次才报 
+[OK  ] 防抖 离线需连续3次(2次不算) 
+[OK  ] 防抖 抖动(离线/在线交替)不刷屏 
 [OK  ] 端口SNMP注册表路径构造 
+[OK  ] Send-Notification 函数存在 
+[OK  ] Send-Toast 函数存在 
 [OK  ] Read-Config 返回对象 
 
 失败用例数: 0

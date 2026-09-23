@@ -5,9 +5,23 @@ $ScriptDir = Split-Path $MyInvocation.MyCommand.Path -Parent
 $src  = Join-Path $ScriptDir 'PrinterStatusGuard.ps1'
 $exe  = Join-Path $ScriptDir 'PrinterStatusGuard.exe'
 $cmd  = Join-Path $ScriptDir 'PrinterStatusGuard.cmd'
+$ico  = Join-Path $ScriptDir 'app.ico'
 $ver  = '0.1.0'
 
 if (-not (Test-Path $src)) { throw "找不到源文件: $src" }
+
+# 若目标 exe 被占用（程序正在运行），改写到 _new 后缀，避免编译失败
+function Test-FileLocked([string]$p) {
+    if (-not (Test-Path $p)) { return $false }
+    try { $fs = [System.IO.File]::Open($p, 'Open', 'ReadWrite', 'None'); $fs.Close(); return $false }
+    catch { return $true }
+}
+if (Test-FileLocked $exe) {
+    $newExe = Join-Path $ScriptDir 'PrinterStatusGuard_new.exe'
+    Write-Host ("目标被占用（程序运行中），改写到: " + $newExe)
+    Write-Host "请退出正在运行的 PrinterStatusGuard 后，用新文件覆盖旧文件再启动。"
+    $exe = $newExe
+}
 
 Import-Module ps2exe -ErrorAction Stop
 
@@ -25,6 +39,7 @@ $params = @{
     version     = $ver
     noOutput    = $true
 }
+if (Test-Path $ico) { $params.iconFile = $ico; Write-Host ("使用图标: " + $ico) }
 Invoke-ps2exe @params
 
 if (-not (Test-Path $exe)) { throw "编译失败：未生成 $exe" }

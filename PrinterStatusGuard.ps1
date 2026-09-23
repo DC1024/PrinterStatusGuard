@@ -15,8 +15,14 @@ param(
 $ErrorActionPreference = 'Continue'
 $ScriptVersion = '0.1.0'
 
-# 取脚本目录（exe 形态下 $MyInvocation.MyCommand.Path 是 exe 路径；ps1 形态下是 ps1 路径）
+# 取脚本目录（exe 形态下 ps2exe 不设置 $MyInvocation.MyCommand.Path，须从进程主模块取，否则会错用 CWD 导致自启注册指向错误路径）
 function Get-ScriptDir {
+    try {
+        $exePath = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        if ($exePath -and ([IO.Path]::GetFileName($exePath) -like 'PrinterStatusGuard*') -and (Test-Path $exePath)) {
+            return Split-Path $exePath -Parent
+        }
+    } catch { }
     if ($MyInvocation.MyCommand.Path) { return Split-Path $MyInvocation.MyCommand.Path -Parent }
     if ($PSScriptRoot) { return $PSScriptRoot }
     return (Get-Location).Path
@@ -28,6 +34,65 @@ if (-not $ExeOrScript) { $ExeOrScript = Join-Path $ScriptDir 'PrinterStatusGuard
 $ConfigDir = Join-Path $env:APPDATA 'PrinterStatusGuard'
 $ConfigFile = Join-Path $ConfigDir 'config.json'
 $LogDir = Join-Path $ConfigDir 'logs'
+
+# ===================== 日志基础设施 =====================
+# 内存环形缓冲 + 文件落盘；GUI「日志」页实时渲染（仅 UI 线程访问控件）。
+# 日志用于让用户看到「软件与打印机之间真实交互了什么」——尤其是排查「卡纸没提示、只提示过热」这类问题。
+$Global:LogEntries = New-Object System.Collections.ArrayList
+$Global:LogMax = 3000
+$Global:LogGrid = $null          # 由 GUI 在创建日志页时赋值
+$Global:LogFilter = '全部'
+
+function Write-Log {
+    param([string]$Level = 'Info', [string]$Source = 'APP', [string]$Message)
+    if ([string]::IsNullOrWhiteSpace($Level)) { $Level = 'Info' }
+    if ([string]::IsNullOrWhiteSpace($Source)) { $Source = 'APP' }
+    $time = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
+    $entry = [ordered]@{ Time = $time; Level = $Level; Source = $Source; Message = $Message }
+    try {
+        [void]$Global:LogEntries.Add($entry)
+        while ($Global:LogEntries.Count -gt $Global:LogMax) { $Global:LogEntries.RemoveAt(0) }
+    } catch { }
+    # 文件落盘（每天一个文件，UTF-8 无 BOM 追加）
+    try {
+        if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
+        $f = Join-Path $LogDir ('app-' + (Get-Date -Format 'yyyy-MM-dd') + '.log')
+        $line = ('[{0}] [{1}] [{2}] {3}' -f $time, $Level.ToUpper(), $Source, $Message)
+        [System.IO.File]::AppendAllText($f, $line + "`r`n", (New-Object System.Text.UTF8Encoding($false)))
+    } catch { }
+    # GUI 实时渲染（日志页已创建且控件未销毁时）
+    try {
+        if ($null -ne $Global:LogGrid -and $Global:LogGrid.IsDisposed -eq $false) {
+            if ($Global:LogFilter -eq '全部' -or $Global:LogFilter -eq $Level) {
+                $ri = $Global:LogGrid.Rows.Add($time, $Level, $Source, $Message)
+                if ($Level -eq 'Error') { $Global:LogGrid.Rows[$ri].DefaultCellStyle.BackColor = [System.Drawing.Color]::MistyRose }
+                elseif ($Level -eq 'Warning') { $Global:LogGrid.Rows[$ri].DefaultCellStyle.BackColor = [System.Drawing.Color]::LightYellow }
+                # 防止长时间后台运行时网格行数无限增长
+                if ($Global:LogGrid.Rows.Count -gt $Global:LogMax) { $Global:LogGrid.Rows.RemoveAt(0) }
+            }
+        }
+    } catch { }
+}
+
+function Apply-LogFilter {
+    if ($null -eq $Global:LogGrid) { return }
+    try {
+        $Global:LogGrid.Rows.Clear()
+        foreach ($e in $Global:LogEntries) {
+            if ($Global:LogFilter -eq '全部' -or $Global:LogFilter -eq $e.Level) {
+                $ri = $Global:LogGrid.Rows.Add($e.Time, $e.Level, $e.Source, $e.Message)
+                if ($e.Level -eq 'Error') { $Global:LogGrid.Rows[$ri].DefaultCellStyle.BackColor = [System.Drawing.Color]::MistyRose }
+                elseif ($e.Level -eq 'Warning') { $Global:LogGrid.Rows[$ri].DefaultCellStyle.BackColor = [System.Drawing.Color]::LightYellow }
+            }
+        }
+    } catch { }
+}
+
+function Clear-Log {
+    try { $Global:LogEntries.Clear() } catch { }
+    try { if ($null -ne $Global:LogGrid) { $Global:LogGrid.Rows.Clear() } } catch { }
+    Write-Log -Level 'Info' -Source 'APP' -Message '日志已清空'
+}
 
 # ===================== 纯逻辑：状态原因映射 =====================
 # IPP printer-state-reasons 关键词 -> 中文 + 严重度
@@ -74,6 +139,33 @@ function ConvertFrom-PrinterState {
         5 { return @{ Text = '已停止'; Sev = 'Warning' } }
         default { return @{ Text = "状态$State"; Sev = 'OK' } }
     }
+}
+
+# IPP 友好原因 + SNMP 位域 -> 统一的问题清单与严重度。
+# 关键点：卡纸在 RFC 2790 里没有专门位，通常落在 IPP printer-state-reasons(media-jam/paper-jam)，
+# 或落在厂商自定义 SNMP 位（显示为 'bit X.Y'）。把两路合并，任何一路有异常都不再漏报。
+function Merge-PrinterStatus {
+    param([hashtable]$StateInfo, [array]$FriendlyReasons, [array]$SnmpBits)
+    $issues = New-Object System.Collections.ArrayList
+    $critCount = 0
+    if ($FriendlyReasons) {
+        foreach ($fr in $FriendlyReasons) {
+            if ($fr.Sev -ne 'OK') {
+                [void]$issues.Add($fr.Text)
+                if ($fr.Sev -eq 'Critical') { $critCount++ }
+            }
+        }
+    }
+    if ($SnmpBits) {
+        foreach ($b in $SnmpBits) {
+            [void]$issues.Add($b)
+            # 卡纸/缺纸/碳粉/墨水等关键语义位按 Critical 提升级别（含厂商自定义位）
+            if ($b -match '卡纸|缺纸|碳粉|墨水|墨') { $critCount++ }
+        }
+    }
+    $sev = 'OK'
+    if ($issues.Count -gt 0) { $sev = if ($critCount -gt 0) { 'Critical' } else { 'Warning' } }
+    return @{ Issues = $issues; Sev = $sev; Text = (($issues | Sort-Object) -join '、') }
 }
 
 # ===================== 纯逻辑：IPP 客户端（复用已验证代码） =====================
@@ -263,23 +355,34 @@ $SnmpErrorBits = [ordered]@{
     '1.4' = '出纸盘已满'; '1.5' = '进纸盘为空(缺纸)'; '1.6' = '维护到期'
 }
 
+# 把 hrPrinterDetectedErrorState 的 OCTET STRING 原始字节解码成人类可读位名。
+# RFC 2790 没有卡纸位，厂商自定义位会显示为 'bit X.Y'（日志里能看到原始字节，便于后续映射）。
+# 注意：单元素 byte[] 传给 [byte[]] 参数会被 PowerShell 拆成标量，必须先归一化为数组（否则单 bit 解码会失败）。
+function ConvertFrom-SnmpErrorState($Raw) {
+    $bits = New-Object System.Collections.ArrayList
+    if ($null -eq $Raw) { return $bits }
+    if ($Raw -isnot [System.Array]) { $Raw = @($Raw) }
+    if ($Raw.Length -eq 0) { return $bits }
+    for ($by = 0; $by -lt $Raw.Length; $by++) {
+        for ($bit = 0; $bit -lt 8; $bit++) {
+            if ((([int]$Raw[$by] -shr $bit) -band 1) -eq 1) {
+                $key = "$by.$bit"; $nm = $SnmpErrorBits[$key]
+                if ([string]::IsNullOrEmpty($nm)) { $nm = 'bit ' + $key }
+                [void]$bits.Add($nm)
+            }
+        }
+    }
+    # 用 ,$bits 防止单元素数组在返回时被 PowerShell 拆成标量字符串（否则 $x[0] 会变成第一个字符）
+    return , $bits
+}
+
 function Get-SnmpPrinterErrorState {
     param([string]$Ip, [string]$Community = 'public')
     $resp = Invoke-SnmpGet -Target $Ip -Community $Community -Oid '1.3.6.1.2.1.25.3.5.1.2.1' -TimeoutMs 2000
     if ($null -eq $resp) { return $null }
     $d = Decode-Snmp $resp
     if ($d.Type -eq 0x04 -and $null -ne $d.Raw -and $d.Raw.Length -gt 0) {
-        $bits = @()
-        for ($by = 0; $by -lt $d.Raw.Length; $by++) {
-            for ($bit = 0; $bit -lt 8; $bit++) {
-                if ((([int]$d.Raw[$by] -shr $bit) -band 1) -eq 1) {
-                    $key = "$by.$bit"; $nm = $SnmpErrorBits[$key]
-                    if ([string]::IsNullOrEmpty($nm)) { $nm = 'bit ' + $key }
-                    $bits += $nm
-                }
-            }
-        }
-        return $bits
+        return ConvertFrom-SnmpErrorState $d.Raw
     }
     return $null
 }
@@ -399,12 +502,7 @@ function Write-Config($Cfg) {
 
 function Save-Log {
     param([string]$Msg)
-    try {
-        if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
-        $f = Join-Path $LogDir ('guard-' + (Get-Date -Format 'yyyy-MM-dd') + '.log')
-        ('[{0}] {1}' -f (Get-Date -Format 'HH:mm:ss'), $Msg) | Out-File $f -Encoding UTF8 -Append
-    }
-    catch { }
+    Write-Log -Level 'Info' -Source 'APP' -Message $Msg
 }
 
 # ===================== 纯逻辑：通知（Toast 优先，失败回退气泡） =====================
@@ -469,21 +567,59 @@ function Send-Notification {
 }
 
 # ===================== 纯逻辑：哨兵一轮巡检 =====================
+# 通知防抖（迟滞）：异常立即上报（用户希望看到）；但「离线」与「已恢复」必须连续 2 次轮询稳定才上报，
+# 避免打印机 IPP/SNMP 抖动（瞬时超时、单轮毛刺）造成「恢复」通知刷屏。
+$script:PollState = $null
+
+function Update-PollState($t, [string]$Category, $events, $stateInfo = $null, $merged = $null) {
+    if (-not $script:PollState) { $script:PollState = @{} }
+    $ps = $script:PollState[$t.Ip]
+    if ($null -eq $ps) { $ps = @{ ReportedState = $null; RawCategory = ''; StableCount = 0 }; $script:PollState[$t.Ip] = $ps }
+    if ($ps.RawCategory -eq $Category) { $ps.StableCount++ } else { $ps.RawCategory = $Category; $ps.StableCount = 1 }
+    switch ($Category) {
+        'offline' {
+            # 连续 3 次无响应才报离线：扫描/打印时打印机常短暂不响应 IPP，属正常，不能当故障报警
+            if ($ps.StableCount -ge 3 -and $ps.ReportedState -ne 'offline') {
+                [void]$events.Add(@{ Target = $t; Title = ('【' + $t.Name + '】无响应'); Message = 'IPP 端口无响应，可能已关机或网络不通'; Icon = 'Error' })
+                $ps.ReportedState = 'offline'
+                Write-Log -Level 'Error' -Source 'ALERT' -Message ('[' + $t.Name + '] 离线/无响应（连续3次确认）')
+            }
+        }
+        'anomaly' {
+            # 异常立即上报（用户希望第一时间看到卡纸/过热等），但同一异常不重复刷屏（去重）
+            if ($ps.ReportedState -ne 'anomaly') {
+                $icon = if ($merged.Sev -eq 'Critical') { 'Error' } else { 'Warning' }
+                [void]$events.Add(@{ Target = $t; Title = ('【' + $t.Name + '】' + $stateInfo.Text); Message = $merged.Text; Icon = $icon })
+                $ps.ReportedState = 'anomaly'
+                Write-Log -Level $icon -Source 'ALERT' -Message ('[' + $t.Name + '] ' + $stateInfo.Text + ' -> ' + $merged.Text)
+            }
+        }
+        'ok' {
+            # 仅当之前确实报过异常/离线，且连续 3 次稳定正常，才报「已恢复」（扫描结束后的短暂回 idle 不再刷屏）
+            if ($ps.StableCount -ge 3 -and $ps.ReportedState -ne 'ok' -and $ps.ReportedState -ne $null) {
+                [void]$events.Add(@{ Target = $t; Title = ('【' + $t.Name + '】已恢复'); Message = '状态恢复正常'; Icon = 'Info' })
+                $ps.ReportedState = 'ok'
+                Write-Log -Level 'Info' -Source 'ALERT' -Message ('[' + $t.Name + '] 状态恢复正常（连续3次确认）')
+            }
+        }
+    }
+}
+
 function Invoke-SentinelPoll($Cfg) {
     $events = New-Object System.Collections.ArrayList
+    if (-not $script:PollState) { $script:PollState = @{} }
     foreach ($t in $Cfg.Targets) {
         if (-not $t.Enabled) { continue }
+        # ---- IPP 巡检 ----
         $attrs = Invoke-IppGetPrinterAttributes -Ip $t.Ip -Port $t.Port -Path $t.Path -Requested @('printer-state', 'printer-state-reasons', 'printer-is-accepting-jobs', 'marker-levels', 'printer-make-and-model')
         if ($null -eq $attrs) {
             # 重试一次（某些机型只认第一条 requested-attributes）
             $attrs = Invoke-IppGetPrinterAttributes -Ip $t.Ip -Port $t.Port -Path $t.Path -Requested @('printer-state-reasons')
         }
         if ($null -eq $attrs) {
-            $now = '离线/无响应'
-            if ($t.LastState -ne $now) {
-                $t.LastState = $now; $t.LastReasons = ''
-                [void]$events.Add(@{ Target = $t; Title = ('【' + $t.Name + '】无响应'); Message = 'IPP 端口无响应，可能已关机或网络不通'; Icon = 'Error' })
-            }
+            Write-Log -Level 'Error' -Source 'POLL' -Message ('IPP 无响应: ' + $t.Ip + ' (' + $t.Name + ')')
+            $t.LastState = '离线/无响应'; $t.LastReasons = ''
+            Update-PollState $t 'offline' $events
             continue
         }
         $state = 0
@@ -497,21 +633,23 @@ function Invoke-SentinelPoll($Cfg) {
         $reasons = ($reasonsRaw -split '\s+' | Where-Object { $_ -ne '' })
         $friendly = ConvertFrom-StateReasons -Reasons $reasons
         $stateInfo = ConvertFrom-PrinterState -State $state
-        # 组合当前状态签名：状态 + 原因集合
-        $sig = ($stateInfo.Text + '|' + (($reasons | Sort-Object) -join ','))
-        $prevSig = ($t.LastState + '|' + ($t.LastReasons))
-        if ($sig -ne $prevSig) {
-            # 只在出现非「正常/空闲」的异常时弹通知；恢复正常也提示一次
-            $crit = $friendly | Where-Object { $_.Sev -ne 'OK' }
-            if ($crit.Count -gt 0) {
-                $msgs = ($friendly | Where-Object { $_.Sev -ne 'OK' } | ForEach-Object { $_.Text }) -join '、'
-                [void]$events.Add(@{ Target = $t; Title = ('【' + $t.Name + '】' + $stateInfo.Text); Message = $msgs; Icon = 'Warning' })
-            }
-            elseif ($prevSig -ne '') {
-                [void]$events.Add(@{ Target = $t; Title = ('【' + $t.Name + '】已恢复'); Message = '状态恢复正常'; Icon = 'Info' })
-            }
-            $t.LastState = $stateInfo.Text; $t.LastReasons = (($reasons | Sort-Object) -join ',')
+
+        # ---- SNMP 巡检（交叉确认，补 IPP 缺失的厂商位，如卡纸） ----
+        $snmpBits = $null
+        try {
+            $snmpBits = Get-SnmpPrinterErrorState -Ip $t.Ip -Community $t.Community
         }
+        catch { Write-Log -Level 'Warning' -Source 'POLL' -Message ('SNMP 查询异常 ' + $t.Ip + ': ' + $_.Exception.Message) }
+        # 记录原始数据，便于排查「卡纸没提示、只提示过热」这类问题：用户可在「日志」页看到打印机到底发了什么
+        Write-Log -Level 'Info' -Source 'POLL' -Message ('IPP 原始原因 [' + $t.Ip + ']: ' + $(if ($reasonsRaw) { $reasonsRaw } else { '(空/无)' }))
+        Write-Log -Level 'Info' -Source 'POLL' -Message ('SNMP 位域 [' + $t.Ip + ']: ' + $(if ($snmpBits -and $snmpBits.Count -gt 0) { ($snmpBits -join ',') } else { '(无/未启用 SNMP)' }))
+
+        # ---- 合并两路，判定类别 ----
+        $merged = Merge-PrinterStatus -StateInfo $stateInfo -FriendlyReasons $friendly -SnmpBits $snmpBits
+        $t.LastState = if ($merged.Issues.Count -gt 0) { $merged.Text } else { $stateInfo.Text }
+        $t.LastReasons = (($reasons | Sort-Object) -join ',')
+        $category = if ($merged.Sev -eq 'OK') { 'ok' } else { 'anomaly' }
+        Update-PollState $t $category $events $stateInfo $merged
     }
     return $events
 }
@@ -575,12 +713,61 @@ if ($SelfTest) {
     $d = Decode-Snmp $outer
     ST 'SNMP 解码 ErrStatus=0' ($d.ErrStatus -eq 0)
     ST 'SNMP 解码 value=5 (int)' ($d.Type -eq 0x02 -and $d.Text -eq '5')
+    # 4b) SNMP hrPrinterDetectedErrorState(OCTET STRING) 解码 + 位域映射
+    $oidH = Tlv 0x06 (Get-IppOidBytes '1.3.6.1.2.1.25.3.5.1.2.1')
+    $valH = Tlv 0x04 @([byte]0x04)          # OCTET STRING，内容 0x04 -> bit 0.2 = 定影器过热
+    $vbH = Tlv 0x30 (@(@($oidH) + @($valH)))
+    $vblH = Tlv 0x30 $vbH
+    $pduH = Tlv 0xA2 (@(@($reqId) + @($errStat) + @($errIdx) + @($vblH)))
+    $outerH = Tlv 0x30 (@(@($ver) + @($comm) + @($pduH)))
+    $dH = Decode-Snmp $outerH
+    ST 'SNMP 解码 hrPrinterDetectedErrorState(OCTET STRING)' ($dH.Type -eq 0x04 -and $dH.Raw.Length -eq 1 -and $dH.Raw[0] -eq 0x04)
+    $hbits = ConvertFrom-SnmpErrorState $dH.Raw
+    ST 'SNMP 位域 0x04 -> 定影器过热' ($hbits.Count -eq 1 -and $hbits[0] -eq '定影器过热')
+    $hbits2 = ConvertFrom-SnmpErrorState @([byte]0x04, [byte]0x02)
+    ST 'SNMP 位域 多bit 解码' ($hbits2.Count -eq 2 -and $hbits2[0] -eq '定影器过热' -and $hbits2[1] -eq '出纸盘缺失')
+    # 4c) 状态合并（IPP 原因 + SNMP 位域）
+    $m1 = Merge-PrinterStatus -StateInfo @{ Text = '空闲'; Sev = 'OK' } -FriendlyReasons @(@{ Text = '正常'; Sev = 'OK' }) -SnmpBits @('定影器过热')
+    ST '合并 正常+过热 -> Warning' ($m1.Sev -eq 'Warning' -and $m1.Text -eq '定影器过热')
+    $m2 = Merge-PrinterStatus -StateInfo @{ Text = '已停止'; Sev = 'Warning' } -FriendlyReasons @(@{ Text = '卡纸'; Sev = 'Critical' }) -SnmpBits $null
+    ST '合并 卡纸 -> Critical' ($m2.Sev -eq 'Critical' -and $m2.Text -eq '卡纸')
+    $m3 = Merge-PrinterStatus -StateInfo @{ Text = '空闲'; Sev = 'OK' } -FriendlyReasons @(@{ Text = '正常'; Sev = 'OK' }) -SnmpBits $null
+    ST '合并 全正常 -> OK' ($m3.Sev -eq 'OK' -and $m3.Issues.Count -eq 0)
+    $m4 = Merge-PrinterStatus -StateInfo @{ Text = '空闲'; Sev = 'OK' } -FriendlyReasons @(@{ Text = '正常'; Sev = 'OK' }) -SnmpBits @('bit 2.3')
+    ST '合并 厂商自定义位 -> Warning(不漏报)' ($m4.Sev -eq 'Warning' -and $m4.Text -eq 'bit 2.3')
+    # 4d) 通知防抖（迟滞）逻辑：异常去重、恢复需连续2次、抖动不刷屏
+    $script:PollState = @{}
+    $ft = [pscustomobject]@{ Ip = '10.0.0.1'; Name = '测试机' }
+    $ev = New-Object System.Collections.ArrayList
+    Update-PollState $ft 'anomaly' $ev @{ Text = '空闲'; Sev = 'Warning' } @{ Sev = 'Warning'; Text = '定影器过冷'; Issues = @('定影器过冷') }
+    Update-PollState $ft 'anomaly' $ev @{ Text = '空闲'; Sev = 'Warning' } @{ Sev = 'Warning'; Text = '定影器过冷'; Issues = @('定影器过冷') }
+    ST '防抖 异常只报一次(去重)' ($ev.Count -eq 1)
+    $ev2 = New-Object System.Collections.ArrayList
+    Update-PollState $ft 'ok' $ev2
+    Update-PollState $ft 'ok' $ev2
+    Update-PollState $ft 'ok' $ev2
+    ST '防抖 恢复需连续3次才报' ($ev2.Count -eq 1)
+    # 离线需连续3次；2次（扫描时短暂不响应 IPP）不算故障
+    $script:PollState = @{}
+    $ft3 = [pscustomobject]@{ Ip = '10.0.0.3'; Name = '离线机' }
+    $ev4 = New-Object System.Collections.ArrayList
+    Update-PollState $ft3 'offline' $ev4
+    Update-PollState $ft3 'offline' $ev4
+    ST '防抖 离线需连续3次(2次不算)' ($ev4.Count -eq 0)
+    $script:PollState = @{}
+    $ft2 = [pscustomobject]@{ Ip = '10.0.0.2'; Name = '抖动机' }
+    $ev3 = New-Object System.Collections.ArrayList
+    Update-PollState $ft2 'offline' $ev3
+    Update-PollState $ft2 'ok' $ev3
+    Update-PollState $ft2 'offline' $ev3
+    Update-PollState $ft2 'ok' $ev3
+    ST '防抖 抖动(离线/在线交替)不刷屏' ($ev3.Count -eq 0)
     # 5) 端口注册表路径构造（不实际写）—— 用字符串拼接，不能用 Join-Path（会把 '/' 当成分隔符）
     $kp = 'HKLM:\SYSTEM\CurrentControlSet\Control\Print\Monitors\Standard TCP/IP Port\Ports' + '\' + 'IP_192.168.1.100'
     ST '端口SNMP注册表路径构造' ($kp -match 'Standard TCP/IP Port\\Ports\\IP_192.168.1.100')
-    # 6) 通知函数存在
-    ST 'Send-Notification 函数存在' (Get-Command Send-Notification -ErrorAction SilentlyContinue)
-    ST 'Send-Toast 函数存在' (Get-Command Send-Toast -ErrorAction SilentlyContinue)
+    # 6) 通知函数存在（注意：Get-Command 返回 FunctionInfo，须转 bool，否则 ST 的 [bool]$pass 绑定会抛错）
+    ST 'Send-Notification 函数存在' ($null -ne (Get-Command Send-Notification -ErrorAction SilentlyContinue))
+    ST 'Send-Toast 函数存在' ($null -ne (Get-Command Send-Toast -ErrorAction SilentlyContinue))
     # 7) 配置读写
     ST 'Read-Config 返回对象' ($null -ne (Read-Config))
 
@@ -651,8 +838,6 @@ function Start-Sentinel {
     $GuardRunning = $true
     $miGuard.Text = '停止哨兵'
     $Global:NotifyIcon.Text = 'PrinterStatusGuard — 哨兵运行中'
-    $script:SnmpFailedNotified = @{}
-    $script:SnmpLastCheck = @{}
     $SentinelTimer = New-Object System.Windows.Forms.Timer
     $SentinelTimer.Interval = [math]::Max(10, $Cfg.IntervalSec) * 1000
     $SentinelTimer.Add_Tick({
@@ -662,24 +847,8 @@ function Start-Sentinel {
                 $how = Send-Notification -Title $e.Title -Message $e.Message -Icon $e.Icon
                 Save-Log ($e.Title + ' | ' + $e.Message + ' [' + $how + ']')
             }
-            # 同时用 SNMP 补一路（若端口已开启 SNMP），把缺纸/缺墨也反映到 Windows 原生状态
-            foreach ($t in $script:Cfg.Targets) {
-                if (-not $t.Enabled) { continue }
-                $now = Get-Date
-                if ($script:SnmpLastCheck.Contains($t.Ip) -and (($now - $script:SnmpLastCheck[$t.Ip]).TotalSeconds -lt $script:Cfg.IntervalSec)) { continue }
-                $script:SnmpLastCheck[$t.Ip] = $now
-                $bits = Get-SnmpPrinterErrorState -Ip $t.Ip -Community $t.Community
-                if ($null -ne $bits -and $bits.Count -gt 0) {
-                    $key = ($bits -join ',')
-                    if (-not $script:SnmpFailedNotified.Contains($t.Ip) -or $script:SnmpFailedNotified[$t.Ip] -ne $key) {
-                        $script:SnmpFailedNotified[$t.Ip] = $key
-                        $how = Send-Notification -Title ('【' + $t.Name + '】SNMP') -Message ('打印机状态: ' + ($bits -join '、')) -Icon 'Warning'
-                        Save-Log ('SNMP ' + $t.Ip + ': ' + ($bits -join '、') + ' [' + $how + ']')
-                    }
-                }
-            }
         }
-        catch { Save-Log ('SENTINEL ERROR: ' + $_.Exception.Message) }
+        catch { Write-Log -Level 'Error' -Source 'SENTINEL' -Message ('巡检异常: ' + $_.Exception.Message) }
     })
     $SentinelTimer.Start()
     if ($FromUi) { Save-Log '哨兵已启动' }
@@ -895,6 +1064,56 @@ $btnGuardB.Add_Click({
 $numInterval.Add_ValueChanged({ $Cfg.IntervalSec = [int]$numInterval.Value; Write-Config $Cfg })
 $chkAutoB.Add_CheckedChanged({ Set-AutoStart -Enable $chkAutoB.Checked; $miAuto.Checked = $chkAutoB.Checked })
 
+# --- Tab C: 日志（诊断） ---
+$tabC = New-Object System.Windows.Forms.TabPage; $tabC.Text = '日志（诊断）'
+$tab.Controls.Add($tabC)
+
+$lblC = New-Object System.Windows.Forms.Label
+$lblC.Text = '记录软件与打印机交互的原始消息（IPP 原始原因 / SNMP 位域 / 通知）。可用等级筛选定位「卡纸没提示」等问题。'
+$lblC.Location = New-Object System.Drawing.Point(12, 12); $lblC.Size = New-Object System.Drawing.Size(780, 28); $lblC.AutoSize = $false
+$tabC.Controls.Add($lblC)
+
+$dgvC = New-Object System.Windows.Forms.DataGridView
+$dgvC.Location = New-Object System.Drawing.Point(12, 44); $dgvC.Size = New-Object System.Drawing.Size(780, 380)
+$dgvC.AllowUserToAddRows = $false; $dgvC.ReadOnly = $true; $dgvC.AutoSizeColumnsMode = 'AllCells'
+$dgvC.Columns.Add('Time', '时间') | Out-Null
+$dgvC.Columns.Add('Level', '等级') | Out-Null
+$dgvC.Columns.Add('Source', '来源') | Out-Null
+$dgvC.Columns.Add('Message', '消息') | Out-Null
+$tabC.Controls.Add($dgvC)
+$Global:LogGrid = $dgvC
+
+$cboFilter = New-Object System.Windows.Forms.ComboBox
+$cboFilter.Location = New-Object System.Drawing.Point(12, 432); $cboFilter.Size = New-Object System.Drawing.Size(120, 22)
+$cboFilter.DropDownStyle = 'DropDownList'
+$cboFilter.Items.Add('全部') | Out-Null
+$cboFilter.Items.Add('Info') | Out-Null
+$cboFilter.Items.Add('Warning') | Out-Null
+$cboFilter.Items.Add('Error') | Out-Null
+$cboFilter.SelectedIndex = 0
+$tabC.Controls.Add($cboFilter)
+
+$btnClearLog = New-Object System.Windows.Forms.Button
+$btnClearLog.Text = '清空日志'; $btnClearLog.Location = New-Object System.Drawing.Point(150, 430); $btnClearLog.Size = New-Object System.Drawing.Size(100, 26)
+$tabC.Controls.Add($btnClearLog)
+
+$btnOpenLogDir = New-Object System.Windows.Forms.Button
+$btnOpenLogDir.Text = '打开日志文件夹'; $btnOpenLogDir.Location = New-Object System.Drawing.Point(262, 430); $btnOpenLogDir.Size = New-Object System.Drawing.Size(130, 26)
+$tabC.Controls.Add($btnOpenLogDir)
+
+$lblFilterNote = New-Object System.Windows.Forms.Label
+$lblFilterNote.Text = '等级筛选:'; $lblFilterNote.Location = New-Object System.Drawing.Point(400, 436); $lblFilterNote.Size = New-Object System.Drawing.Size(70, 20)
+$tabC.Controls.Add($lblFilterNote)
+
+$cboFilter.Add_SelectedIndexChanged({
+    $Global:LogFilter = $cboFilter.SelectedItem.ToString()
+    Apply-LogFilter
+})
+$btnClearLog.Add_Click({ Clear-Log })
+$btnOpenLogDir.Add_Click({
+    try { if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }; Start-Process 'explorer.exe' $LogDir } catch { }
+})
+
 # 主窗体关闭 -> 最小化到托盘（不退出）
 $MainForm.Add_FormClosing({
     if (-not $Global:ExitFlag) {
@@ -909,6 +1128,7 @@ function Show-MainForm {
 }
 
 # ===================== 启动 =====================
+Write-Log -Level 'Info' -Source 'APP' -Message ('PrinterStatusGuard 启动 v' + $ScriptVersion + '；配置目录 ' + $ConfigDir)
 Refresh-PortsGrid
 Refresh-TargetsGrid
 $txtLogB.AppendText(('配置目录: ' + $ConfigDir + "`r`n"))

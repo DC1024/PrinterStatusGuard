@@ -1,0 +1,9 @@
+# Build / debug scratch (not source of truth)
+_t.txt
+build.log
+gen_icon.log
+ico_check.txt
+app_preview.png
+
+# Build fallback when target exe is locked by a running instance
+PrinterStatusGuard_new.exe
