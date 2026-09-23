@@ -1,0 +1,12 @@
+﻿[OK  ] 状态原因映射 media-jam/toner-low 
+[OK  ] 状态原因映射 none -> 正常 m2.Count=1 Text=正常 Sev=OK
+[OK  ] 打印机状态 3->空闲 
+[OK  ] 打印机状态 5->已停止 
+[OK  ] IPP 解析 printer-state=3 
+[OK  ] IPP 解析 printer-state-reasons=none 
+[OK  ] SNMP 解码 ErrStatus=0 
+[OK  ] SNMP 解码 value=5 (int) 
+[OK  ] 端口SNMP注册表路径构造 
+[OK  ] Read-Config 返回对象 
+
+失败用例数: 0
