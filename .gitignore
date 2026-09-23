@@ -4,6 +4,10 @@ build.log
 gen_icon.log
 ico_check.txt
 app_preview.png
+_*.log
 
 # Build fallback when target exe is locked by a running instance
 PrinterStatusGuard_new.exe
+
+# Backup taken before replacing the exe
+*.bak
