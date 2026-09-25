@@ -15,7 +15,7 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
-$ScriptVersion = '1.1.1'
+$ScriptVersion = '1.1.2'
 
 # 取脚本目录（exe 形态下 ps2exe 不设置 $MyInvocation.MyCommand.Path，须从进程主模块取，否则会错用 CWD 导致自启注册指向错误路径）
 function Get-ScriptDir {
@@ -523,8 +523,9 @@ function Read-Config {
         try { return (Get-Content $ConfigFile -Encoding UTF8 | ConvertFrom-Json) } catch { }
     }
     return [pscustomobject]@{
-        IntervalSec = 30
-        Targets     = @()
+        IntervalSec     = 30
+        Targets         = @()
+        AutoUpdateCheck = $true
     }
 }
 
@@ -1640,6 +1641,69 @@ if ($Repair -or $ClearQueue) {
     }
 }
 
+# ===================== 检查更新（GitHub Releases API） =====================
+function Get-LatestRelease {
+    # 查询最新 Release；普通用户权限即可，无需提权。纯 .NET HttpWebRequest，无外部依赖。
+    try {
+        $req = [System.Net.HttpWebRequest]::Create('https://api.github.com/repos/DC1024/PrinterStatusGuard/releases/latest')
+        $req.UserAgent = 'PrinterStatusGuard'
+        $req.Timeout = 8000
+        $resp = $req.GetResponse()
+        $sr = New-Object System.IO.StreamReader($resp.GetResponseStream())
+        $json = $sr.ReadToEnd() | ConvertFrom-Json
+        $sr.Close(); $resp.Close()
+        $exeAsset = $json.assets | Where-Object { $_.name -eq 'PrinterStatusGuard.exe' } | Select-Object -First 1
+        return @{ Ok = $true; Tag = [string]$json.tag_name; Url = [string]$json.html_url; Dl = $(if ($exeAsset) { [string]$exeAsset.browser_download_url } else { [string]$json.html_url }) }
+    }
+    catch { return @{ Ok = $false; Msg = $_.Exception.Message } }
+}
+
+function Test-NewerVersion {
+    # 语义化比较：tag 形如 v1.2.3 / 当前 $ScriptVersion 形如 1.2.3
+    param([string]$Tag, [string]$Current)
+    try {
+        $a = (($Tag -replace '^v', '') -split '\.') | ForEach-Object { [int]$_ }
+        $b = ($Current -split '\.') | ForEach-Object { [int]$_ }
+        for ($i = 0; $i -lt [Math]::Max($a.Count, $b.Count); $i++) {
+            $x = if ($i -lt $a.Count) { $a[$i] } else { 0 }
+            $y = if ($i -lt $b.Count) { $b[$i] } else { 0 }
+            if ($x -gt $y) { return $true }
+            if ($x -lt $y) { return $false }
+        }
+        return $false
+    }
+    catch { return $false }
+}
+
+function Invoke-UpdateCheck {
+    # $Silent=$true 用于启动后的静默巡检：失败不弹窗，只在发现新版本时弹托盘气泡。
+    param([bool]$Silent = $false)
+    $r = Get-LatestRelease
+    if (-not $r.Ok) {
+        Write-Log -Level 'Warning' -Source 'UPDATE' -Message ('检查更新失败: ' + $r.Msg)
+        if (-not $Silent) { [System.Windows.Forms.MessageBox]::Show('检查更新失败：' + $r.Msg, 'PrinterStatusGuard', 'OK', 'Warning') | Out-Null }
+        return
+    }
+    Write-Log -Level 'Info' -Source 'UPDATE' -Message ('当前 v' + $ScriptVersion + '，最新 ' + $r.Tag)
+    if (Test-NewerVersion -Tag $r.Tag -Current $ScriptVersion) {
+        if ($Silent) {
+            if ($Global:NotifyIcon) {
+                $Global:NotifyIcon.ShowBalloonTip(5000, 'PrinterStatusGuard', ('发现新版本 ' + $r.Tag + '（当前 v' + $ScriptVersion + '）。右键托盘 →「检查更新」可打开下载页。'), [System.Windows.Forms.ToolTipIcon]::Info)
+            }
+            return
+        }
+        $msg = '发现新版本 {0}（当前 v{1}）。{2}是否打开下载页面？' -f $r.Tag, $ScriptVersion, [Environment]::NewLine
+        if ([System.Windows.Forms.MessageBox]::Show($msg, 'PrinterStatusGuard 更新', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Information) -eq [System.Windows.Forms.DialogResult]::Yes) {
+            try { Start-Process $r.Url } catch { }
+        }
+    }
+    else {
+        if (-not $Silent) {
+            [System.Windows.Forms.MessageBox]::Show('已是最新版本（v' + $ScriptVersion + '）。', 'PrinterStatusGuard', 'OK', 'Information') | Out-Null
+        }
+    }
+}
+
 # ===================== 无头自检 =====================
 if ($SelfTest) {
     $ok = $true
@@ -1766,6 +1830,11 @@ if ($SelfTest) {
     ST 'Get-AutoStart / Set-AutoStart 函数存在' (($null -ne (Get-Command Get-AutoStart -ErrorAction SilentlyContinue)) -and ($null -ne (Get-Command Set-AutoStart -ErrorAction SilentlyContinue)))
     ST 'Get-AutoStart 返回布尔' ((Get-AutoStart) -is [bool])
     ST 'ExeOrScript 指向存在文件' ((Test-Path $ExeOrScript) -and ($ExeOrScript -match 'PrinterStatusGuard'))
+    # 10) 检查更新（版本号语义比较，不发网络请求）
+    ST 'Test-NewerVersion 1.2.0 > 1.1.1' (Test-NewerVersion -Tag 'v1.2.0' -Current '1.1.1')
+    ST 'Test-NewerVersion 1.1.1 = 1.1.1' (-not (Test-NewerVersion -Tag 'v1.1.1' -Current '1.1.1'))
+    ST 'Test-NewerVersion 1.1.0 < 1.1.1' (-not (Test-NewerVersion -Tag 'v1.1.0' -Current '1.1.1'))
+    ST 'Test-NewerVersion 1.10.0 > 1.9.9' (Test-NewerVersion -Tag 'v1.10.0' -Current '1.9.9')
 
     [void]$r.AppendLine('')
     [void]$r.AppendLine(('失败用例数: ' + $(if ($script:ok) { 0 } else { 1 })))
@@ -1812,6 +1881,11 @@ if ($EnableAutoStart -or $DisableAutoStart) {
 [void][System.Reflection.Assembly]::LoadWithPartialName('System.Drawing')
 
 $Cfg = Read-Config
+# 旧版配置文件没有 AutoUpdateCheck 字段时补默认值（true），并回写一次
+if ($null -eq $Cfg.AutoUpdateCheck) {
+    $Cfg | Add-Member -NotePropertyName AutoUpdateCheck -NotePropertyValue $true
+    Write-Config $Cfg
+}
 
 # 托盘图标（用运行时生成的小位图，避免外部资源）
 function New-TrayIcon {
@@ -1836,8 +1910,11 @@ $cm = New-Object System.Windows.Forms.ContextMenuStrip
 $miShow = $cm.Items.Add('显示主窗口')
 $miGuard = $cm.Items.Add('开始哨兵')
 $miAuto = $cm.Items.Add('开机自启')
+$miUpdate = $cm.Items.Add('检查更新')
+$miUpdAuto = $cm.Items.Add('自动检查更新')
 $miExit = $cm.Items.Add('退出')
 $miAuto.Checked = (Get-AutoStart)
+$miUpdAuto.Checked = [bool]$Cfg.AutoUpdateCheck
 $Global:NotifyIcon.ContextMenuStrip = $cm
 
 $SentinelTimer = $null
@@ -1932,6 +2009,15 @@ function Invoke-AutoStartToggle {
 }
 
 $miAuto.Add_Click({ Invoke-AutoStartToggle -Enable (-not (Get-AutoStart)) })
+$miUpdate.Add_Click({ Invoke-UpdateCheck })
+$miUpdAuto.Add_Click({
+    $Cfg.AutoUpdateCheck = -not [bool]$Cfg.AutoUpdateCheck
+    $miUpdAuto.Checked = [bool]$Cfg.AutoUpdateCheck
+    Write-Config $Cfg
+    $tip = $(if ($Cfg.AutoUpdateCheck) { '已开启自动检查更新（每次启动后静默检查，发现新版本才提示）。' } else { '已关闭自动检查更新；可随时通过「检查更新」手动检查。' })
+    $Global:NotifyIcon.ShowBalloonTip(3000, 'PrinterStatusGuard', $tip, [System.Windows.Forms.ToolTipIcon]::Info)
+    Write-Log -Level 'Info' -Source 'UPDATE' -Message $tip
+})
 $miExit.Add_Click({ Stop-Sentinel; $Global:NotifyIcon.Visible = $false; [System.Windows.Forms.Application]::Exit(); $Global:ExitFlag = $true })
 $Global:NotifyIcon.Add_DoubleClick({ Show-MainForm })
 
@@ -2351,6 +2437,14 @@ try {
 } catch { }
 
 Write-Log -Level 'Info' -Source 'APP' -Message ('PrinterStatusGuard 启动 v' + $ScriptVersion + '；配置目录 ' + $ConfigDir)
+
+# 启动 15 秒后静默检查一次更新（可由托盘「自动检查更新」关闭；仅在发现新版本时弹托盘气泡，失败不打扰）
+if ($Cfg.AutoUpdateCheck) {
+    $updTimer = New-Object System.Windows.Forms.Timer
+    $updTimer.Interval = 15000
+    $updTimer.Add_Tick({ $updTimer.Stop(); Invoke-UpdateCheck -Silent $true })
+    $updTimer.Start()
+}
 Refresh-PortsGrid
 Refresh-TargetsGrid
 $txtLogB.AppendText(('配置目录: ' + $ConfigDir + "`r`n"))

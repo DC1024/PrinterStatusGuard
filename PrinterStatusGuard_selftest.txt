@@ -27,5 +27,9 @@
 [OK  ] Get-AutoStart / Set-AutoStart 函数存在 
 [OK  ] Get-AutoStart 返回布尔 
 [OK  ] ExeOrScript 指向存在文件 
+[OK  ] Test-NewerVersion 1.2.0 > 1.1.1 
+[OK  ] Test-NewerVersion 1.1.1 = 1.1.1 
+[OK  ] Test-NewerVersion 1.1.0 < 1.1.1 
+[OK  ] Test-NewerVersion 1.10.0 > 1.9.9 
 
 失败用例数: 0
