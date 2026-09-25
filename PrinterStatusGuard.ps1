@@ -9,11 +9,13 @@ param(
     [switch]$Guard,
     [switch]$SelfTest,
     [string]$EnablePort,
-    [string]$DisablePort
+    [string]$DisablePort,
+    [switch]$EnableAutoStart,
+    [switch]$DisableAutoStart
 )
 
 $ErrorActionPreference = 'Continue'
-$ScriptVersion = '1.1.0'
+$ScriptVersion = '1.1.1'
 
 # 取脚本目录（exe 形态下 ps2exe 不设置 $MyInvocation.MyCommand.Path，须从进程主模块取，否则会错用 CWD 导致自启注册指向错误路径）
 function Get-ScriptDir {
@@ -28,7 +30,16 @@ function Get-ScriptDir {
     return (Get-Location).Path
 }
 $ScriptDir = Get-ScriptDir
-$ExeOrScript = if ($MyInvocation.MyCommand.Path) { $MyInvocation.MyCommand.Path } else { $PSCommandPath }
+# $ExeOrScript 用于开机自启/提权子进程指向自身：exe 形态必须取进程主模块（ps2exe 不设置 MyCommand.Path），
+# 否则会错误回退到 ps1 路径，导致自启条目指向 powershell+ps1 而不是 exe（旧版自启失效的根因之一）。
+$ExeOrScript = $null
+try {
+    $mmPath = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    if ($mmPath -and ($mmPath -match '\.exe$') -and ([IO.Path]::GetFileName($mmPath) -like 'PrinterStatusGuard*') -and (Test-Path $mmPath)) {
+        $ExeOrScript = $mmPath
+    }
+} catch { }
+if (-not $ExeOrScript) { if ($MyInvocation.MyCommand.Path) { $ExeOrScript = $MyInvocation.MyCommand.Path } else { $ExeOrScript = $PSCommandPath } }
 if (-not $ExeOrScript) { $ExeOrScript = Join-Path $ScriptDir 'PrinterStatusGuard.ps1' }
 
 $ConfigDir = Join-Path $env:APPDATA 'PrinterStatusGuard'
@@ -440,27 +451,50 @@ function Set-PortSnmpEnabled {
 }
 
 function Get-AutoStart {
+    # 计划任务（v1.1.1 起的正牌方案）或旧版 HKCU Run 条目任一存在即视为已开启
+    try {
+        if (Get-ScheduledTask -TaskName 'PrinterStatusGuard' -ErrorAction SilentlyContinue) { return $true }
+    } catch { }
     try {
         $k = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'PrinterStatusGuard' -ErrorAction SilentlyContinue
-        return [bool]($k.'PrinterStatusGuard')
-    }
-    catch { return $false }
+        if ($k -and $k.'PrinterStatusGuard') { return $true }
+    } catch { }
+    return $false
 }
 
 function Set-AutoStart {
+    # 开机自启用「计划任务 + 最高权限 + 登录触发」实现：需要管理员（创建时 UAC 一次），
+    # 之后每次登录静默自启、托盘常驻，不再依赖 HKCU Run（部分环境会被启动项禁用，且无法提权）。
     param([bool]$Enable)
     $rk = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    $tn = 'PrinterStatusGuard'
     if ($Enable) {
-        if ($ExeOrScript -match '\.ps1$') {
-            $cmd = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{0}" -Guard' -f $ExeOrScript
+        if (-not (Test-Admin)) {
+            return @{ Ok = $false; Msg = '注册开机自启需要管理员权限（创建最高权限计划任务）。请允许 UAC 提权后重试。' }
         }
-        else {
-            $cmd = '"{0}" -Guard' -f $ExeOrScript
+        $exe = $ExeOrScript
+        try {
+            if ($exe -match '\.ps1$') {
+                $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -ExecutionPolicy Bypass -File "{0}" -Guard' -f $exe)
+            }
+            else {
+                $action = New-ScheduledTaskAction -Execute $exe -Argument '-Guard'
+            }
+            $trigger = New-ScheduledTaskTrigger -AtLogOn -User ([Security.Principal.WindowsIdentity]::GetCurrent().Name)
+            $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
+            Register-ScheduledTask -TaskName $tn -Action $action -Trigger $trigger -Settings $settings -RunLevel Highest -Force -ErrorAction Stop | Out-Null
         }
-        New-ItemProperty -Path $rk -Name 'PrinterStatusGuard' -Value $cmd -PropertyType String -Force | Out-Null
+        catch {
+            return @{ Ok = $false; Msg = ('创建开机自启计划任务失败: ' + $_.Exception.Message) }
+        }
+        # 清理旧版 Run 键，避免双重启动
+        Remove-ItemProperty -Path $rk -Name $tn -ErrorAction SilentlyContinue
+        return @{ Ok = $true; Msg = '开机自启已开启（计划任务，最高权限；下次登录自动在托盘运行哨兵）。' }
     }
     else {
-        Remove-ItemProperty -Path $rk -Name 'PrinterStatusGuard' -ErrorAction SilentlyContinue
+        try { Unregister-ScheduledTask -TaskName $tn -Confirm:$false -ErrorAction SilentlyContinue } catch { }
+        Remove-ItemProperty -Path $rk -Name $tn -ErrorAction SilentlyContinue
+        return @{ Ok = $true; Msg = '开机自启已关闭。' }
     }
 }
 
@@ -1728,6 +1762,10 @@ if ($SelfTest) {
     $ck = Invoke-PrintSubsystemCheckup -OutDir $ckDir
     ST '深度体检 产出报告且含结论段' (($null -ne $ck) -and ($ck.ReportText.Length -gt 500) -and ($ck.ReportText -match '\[10\] 结论与建议')) ('Flags=' + $ck.FlagCount)
     ST '深度体检 报告文件已落盘' (Test-Path -LiteralPath $ck.ReportPath)
+    # 9) 开机自启（计划任务方案）
+    ST 'Get-AutoStart / Set-AutoStart 函数存在' (($null -ne (Get-Command Get-AutoStart -ErrorAction SilentlyContinue)) -and ($null -ne (Get-Command Set-AutoStart -ErrorAction SilentlyContinue)))
+    ST 'Get-AutoStart 返回布尔' ((Get-AutoStart) -is [bool])
+    ST 'ExeOrScript 指向存在文件' ((Test-Path $ExeOrScript) -and ($ExeOrScript -match 'PrinterStatusGuard'))
 
     [void]$r.AppendLine('')
     [void]$r.AppendLine(('失败用例数: ' + $(if ($script:ok) { 0 } else { 1 })))
@@ -1752,6 +1790,21 @@ if ($EnablePort -or $DisablePort) {
     $r = Set-PortSnmpEnabled -PortName $pn -Enable $en
     [System.Windows.Forms.MessageBox]::Show($r.Msg, 'PrinterStatusGuard') | Out-Null
     exit 0
+}
+
+# ===================== 提权子进程：注册/取消开机自启计划任务并退出 =====================
+# 非管理员点「开机自启」时，用 RunAs 以管理员重启本程序并带上 -EnableAutoStart/-DisableAutoStart，
+# 这里一次性创建/删除计划任务（最高权限）后弹结果并退出（不加载主窗体）。
+if ($EnableAutoStart -or $DisableAutoStart) {
+    $en = [bool]$EnableAutoStart
+    [void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms')
+    if (-not (Test-Admin)) {
+        [System.Windows.Forms.MessageBox]::Show('本操作需要管理员权限，但提权后仍未获得管理员身份。请手动右键「以管理员身份运行」后再试。', 'PrinterStatusGuard') | Out-Null
+        exit 1
+    }
+    $r = Set-AutoStart -Enable $en
+    [System.Windows.Forms.MessageBox]::Show($r.Msg, 'PrinterStatusGuard') | Out-Null
+    if ($r.Ok) { exit 0 } else { exit 1 }
 }
 
 # ===================== 以下为 GUI / 托盘 / 哨兵（仅非自检时运行） =====================
@@ -1823,10 +1876,62 @@ function Stop-Sentinel {
 
 $miShow.Add_Click({ Show-MainForm })
 $miGuard.Add_Click({ if ($GuardRunning) { Stop-Sentinel } else { Start-Sentinel -FromUi $true } })
-$miAuto.Add_Click({
-    $new = -not (Get-AutoStart); Set-AutoStart -Enable $new; $miAuto.Checked = $new
-    Save-Log ('开机自启 ' + $(if ($new) { '已开启' } else { '已关闭' }))
-})
+
+# --- 开机自启（计划任务，最高权限）：UI 统一入口 ---
+$Global:AutoBusy = $false
+
+function Set-AutoStartUi([bool]$Val) {
+    # 程序内同步两处 UI 状态；$AutoBusy 防止 CheckedChanged 级联再次触发真实开关
+    $Global:AutoBusy = $true
+    $chkAutoB.Checked = $Val
+    $miAuto.Checked = $Val
+    $Global:AutoBusy = $false
+}
+
+function Start-ElevatedAutoStart {
+    param([bool]$Enable)
+    $arg = if ($Enable) { '-EnableAutoStart' } else { '-DisableAutoStart' }
+    if ($ExeOrScript -match '\.ps1$') {
+        $psi = 'powershell.exe'
+        $a = '-NoProfile -ExecutionPolicy Bypass -File "{0}" {1}' -f $ExeOrScript, $arg
+    }
+    else {
+        $psi = $ExeOrScript
+        $a = $arg
+    }
+    try { Start-Process -Verb RunAs -FilePath $psi -ArgumentList $a | Out-Null; return $true }
+    catch { return $false }
+}
+
+function Invoke-AutoStartToggle {
+    param([bool]$Enable)
+    if (Test-Admin) {
+        $r = Set-AutoStart -Enable $Enable
+    }
+    else {
+        if (Start-ElevatedAutoStart -Enable $Enable) {
+            # UAC 已弹出，子进程创建/删除计划任务后自行弹结果；这里轮询等待状态落定
+            $deadline = (Get-Date).AddSeconds(12)
+            while ((Get-Date) -lt $deadline) {
+                [System.Windows.Forms.Application]::DoEvents()
+                Start-Sleep -Milliseconds 400
+                if ((Get-AutoStart) -eq $Enable) { break }
+            }
+            $r = @{ Ok = $true; Msg = '已在管理员子进程中处理开机自启。' }
+        }
+        else {
+            $r = @{ Ok = $false; Msg = '已取消：未授予管理员权限，开机自启未更改。' }
+        }
+    }
+    Set-AutoStartUi (Get-AutoStart)
+    if ($Global:NotifyIcon) {
+        $Global:NotifyIcon.ShowBalloonTip(4000, 'PrinterStatusGuard', $r.Msg, [System.Windows.Forms.ToolTipIcon]::Info)
+    }
+    Write-Log -Level $(if ($r.Ok) { 'Info' } else { 'Warning' }) -Source 'APP' -Message ('开机自启: ' + $r.Msg)
+    Save-Log ('开机自启: ' + $r.Msg)
+}
+
+$miAuto.Add_Click({ Invoke-AutoStartToggle -Enable (-not (Get-AutoStart)) })
 $miExit.Add_Click({ Stop-Sentinel; $Global:NotifyIcon.Visible = $false; [System.Windows.Forms.Application]::Exit(); $Global:ExitFlag = $true })
 $Global:NotifyIcon.Add_DoubleClick({ Show-MainForm })
 
@@ -2020,7 +2125,7 @@ $btnGuardB.Add_Click({
 })
 
 $numInterval.Add_ValueChanged({ $Cfg.IntervalSec = [int]$numInterval.Value; Write-Config $Cfg })
-$chkAutoB.Add_CheckedChanged({ Set-AutoStart -Enable $chkAutoB.Checked; $miAuto.Checked = $chkAutoB.Checked })
+$chkAutoB.Add_CheckedChanged({ if ($Global:AutoBusy) { return }; Invoke-AutoStartToggle -Enable $chkAutoB.Checked })
 
 # --- Tab C: 日志（诊断） ---
 $tabC = New-Object System.Windows.Forms.TabPage; $tabC.Text = '日志（诊断）'
@@ -2229,6 +2334,22 @@ function Show-MainForm {
 }
 
 # ===================== 启动 =====================
+# 旧版开机自启迁移：v1.1.0 及以前把自启写在 HKCU Run 且 exe 形态下误指向 ps1，静默失效。
+# 升级后首次运行：清掉旧 Run 条目；已具管理员身份则直接重建为计划任务，否则提示重新勾选。
+try {
+    $oldRun = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'PrinterStatusGuard' -ErrorAction SilentlyContinue
+    if ($oldRun -and $oldRun.'PrinterStatusGuard') {
+        Remove-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'PrinterStatusGuard' -ErrorAction SilentlyContinue
+        if (Test-Admin) {
+            $mig = Set-AutoStart -Enable $true
+            Write-Log -Level 'Info' -Source 'APP' -Message ('开机自启迁移为计划任务: ' + $mig.Msg)
+        }
+        else {
+            Write-Log -Level 'Warning' -Source 'APP' -Message '检测到旧版开机自启条目已清理；请重新勾选「开机自启」并允许管理员权限（改为最高权限计划任务方案）。'
+        }
+    }
+} catch { }
+
 Write-Log -Level 'Info' -Source 'APP' -Message ('PrinterStatusGuard 启动 v' + $ScriptVersion + '；配置目录 ' + $ConfigDir)
 Refresh-PortsGrid
 Refresh-TargetsGrid

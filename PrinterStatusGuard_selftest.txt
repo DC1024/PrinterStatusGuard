@@ -24,5 +24,8 @@
 [OK  ] Invoke-PrintSubsystemCheckup 函数存在 
 [OK  ] 深度体检 产出报告且含结论段 Flags=0
 [OK  ] 深度体检 报告文件已落盘 
+[OK  ] Get-AutoStart / Set-AutoStart 函数存在 
+[OK  ] Get-AutoStart 返回布尔 
+[OK  ] ExeOrScript 指向存在文件 
 
 失败用例数: 0

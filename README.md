@@ -20,6 +20,7 @@ v1.1.0 起，原独立工具 **WinPrintDiag**（打印子系统体检，原仓�
 3. 主界面有四个标签页：
    - **路线 A：启用端口 SNMP** —— 选中打印机的 TCP/IP 端口，点「启用选中端口 SNMP」。需要**管理员权限**（工具会弹 UAC 提权窗口）。开启后 Windows 原生即显示缺纸 / 缺墨。
    - **路线 B：IPP 哨兵** —— 点「添加当前网络打印机」自动导入本机已安装的网络打印机，设置轮询间隔（秒），勾选「开机自启」，点「开始哨兵」。异常时弹桌面通知。
+     > 「开机自启」通过**最高权限计划任务**实现：勾选时弹一次 UAC 授权，之后每次登录自动以管理员身份在托盘静默运行哨兵（v1.1.1 起取代旧版 HKCU Run 方案，旧条目会在升级后首次运行时自动清理）。
    - **日志（诊断）** —— 查看工具与打印机之间的所有交互消息，支持 `全部 / Info / Warning / Error` 等级筛选、清空、打开日志目录。
    - **深度体检** —— 一键扫描打印子系统（源自 WinPrintDiag），见下文「深度体检」。
 4. 关闭主窗口会**最小化到托盘**而非退出；右键托盘图标可「显示主窗口 / 开始哨兵 / 开机自启 / 退出」。
@@ -167,6 +168,7 @@ A **portable, single-file** Windows utility combining two ways to get printer st
 
 ## Notes
 
+- **Auto-start (fixed in v1.1.1):** now implemented as a **scheduled task with highest privileges** (created via a one-time UAC prompt) that runs the tray sentinel at logon — replacing the old HKCU `Run` approach, which neither prompted for admin nor survived startup-app restrictions. Legacy `Run` entries are cleaned up automatically on first run after upgrading.
 - **Deep Checkup (merged from WinPrintDiag since v1.1.0):** a one-click read-only scan (~5 s) covering Spooler service state, spoolsv crash history (Event 1000 / SCM 7031·7034), print-stack file signature integrity, printer/port/driver pairing (duplicate entries for the same physical printer with keep/remove advice, USB port on IPP class-driver mismatch), queue backlog, recent patches/software/unexpected shutdowns, and the print audit-log switch. Reports are saved to `%APPDATA%\PrinterStatusGuard\checkup\` and can be saved elsewhere. Admin buttons: *Repair components* (restore suspect print binaries from WinSxS, quarantining originals first) and *Clear print queue* (moves stuck jobs to a timestamped backup folder — nothing is deleted). The standalone repo [DC1024/winprintdiag](https://github.com/DC1024/winprintdiag) is archived; this repo now provides all of its functionality.
 - SNMP (RFC 2790) covers empty trays / missing supplies but **not jams**; IPP covers jams. Route B now **merges both channels** (`Merge-PrinterStatus`) so a jam from IPP and a vendor bit from SNMP are never dropped or double-reported.
 - **Hysteresis (debounce):** printers briefly drop IPP/SNMP during scanning/printing/sleep, which used to spam "recovered". Anomaly fires immediately (deduped); *offline* and *recovered* each require **3 consecutive stable polls** before firing, so a scan-induced blip no longer floods notifications.
