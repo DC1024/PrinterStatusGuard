@@ -6,7 +6,7 @@ $src  = Join-Path $ScriptDir 'PrinterStatusGuard.ps1'
 $exe  = Join-Path $ScriptDir 'PrinterStatusGuard.exe'
 $cmd  = Join-Path $ScriptDir 'PrinterStatusGuard.cmd'
 $ico  = Join-Path $ScriptDir 'app.ico'
-$ver  = '1.1.2'
+$ver  = '1.1.3'
 
 if (-not (Test-Path $src)) { throw "找不到源文件: $src" }
 

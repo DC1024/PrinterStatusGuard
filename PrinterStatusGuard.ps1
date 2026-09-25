@@ -15,7 +15,7 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
-$ScriptVersion = '1.1.2'
+$ScriptVersion = '1.1.3'
 
 # 取脚本目录（exe 形态下 ps2exe 不设置 $MyInvocation.MyCommand.Path，须从进程主模块取，否则会错用 CWD 导致自启注册指向错误路径）
 function Get-ScriptDir {
@@ -1924,7 +1924,10 @@ function Start-Sentinel {
     param([bool]$FromUi = $true)
     if ($GuardRunning) { return }
     $GuardRunning = $true
+    # 同步两处 UI：托盘菜单（文字+对勾）与主界面按钮，避免「托盘已运行、界面仍显示开始」的不同步
     $miGuard.Text = '停止哨兵'
+    $miGuard.Checked = $true
+    if ($btnGuardB) { $btnGuardB.Text = '停止哨兵' }
     $Global:NotifyIcon.Text = 'PrinterStatusGuard — 哨兵运行中'
     $SentinelTimer = New-Object System.Windows.Forms.Timer
     $SentinelTimer.Interval = [math]::Max(10, $Cfg.IntervalSec) * 1000
@@ -1946,6 +1949,8 @@ function Stop-Sentinel {
     if (-not $GuardRunning) { return }
     $GuardRunning = $false
     $miGuard.Text = '开始哨兵'
+    $miGuard.Checked = $false
+    if ($btnGuardB) { $btnGuardB.Text = '开始哨兵' }
     $Global:NotifyIcon.Text = 'PrinterStatusGuard 打印机状态守护'
     if ($SentinelTimer) { $SentinelTimer.Stop(); $SentinelTimer.Dispose(); $SentinelTimer = $null }
     Save-Log '哨兵已停止'
@@ -2010,14 +2015,28 @@ function Invoke-AutoStartToggle {
 
 $miAuto.Add_Click({ Invoke-AutoStartToggle -Enable (-not (Get-AutoStart)) })
 $miUpdate.Add_Click({ Invoke-UpdateCheck })
-$miUpdAuto.Add_Click({
-    $Cfg.AutoUpdateCheck = -not [bool]$Cfg.AutoUpdateCheck
-    $miUpdAuto.Checked = [bool]$Cfg.AutoUpdateCheck
+
+# --- 自动检查更新：托盘菜单与「设置」页复选框共用同一状态 ---
+$Global:UpdAutoBusy = $false
+
+function Set-UpdAutoUi([bool]$Val) {
+    # 程序内同步两处 UI；$UpdAutoBusy 防止 CheckedChanged 级联再次写配置
+    $Global:UpdAutoBusy = $true
+    $chkUpdAutoS.Checked = $Val
+    $miUpdAuto.Checked = $Val
+    $Global:UpdAutoBusy = $false
+}
+
+function Set-UpdAutoEnabled([bool]$Val) {
+    $Cfg.AutoUpdateCheck = $Val
+    Set-UpdAutoUi $Val
     Write-Config $Cfg
-    $tip = $(if ($Cfg.AutoUpdateCheck) { '已开启自动检查更新（每次启动后静默检查，发现新版本才提示）。' } else { '已关闭自动检查更新；可随时通过「检查更新」手动检查。' })
+    $tip = $(if ($Val) { '已开启自动检查更新（每次启动后静默检查，发现新版本才提示）。' } else { '已关闭自动检查更新；可随时通过「检查更新」手动检查。' })
     $Global:NotifyIcon.ShowBalloonTip(3000, 'PrinterStatusGuard', $tip, [System.Windows.Forms.ToolTipIcon]::Info)
     Write-Log -Level 'Info' -Source 'UPDATE' -Message $tip
-})
+}
+
+$miUpdAuto.Add_Click({ Set-UpdAutoEnabled (-not [bool]$Cfg.AutoUpdateCheck) })
 $miExit.Add_Click({ Stop-Sentinel; $Global:NotifyIcon.Visible = $false; [System.Windows.Forms.Application]::Exit(); $Global:ExitFlag = $true })
 $Global:NotifyIcon.Add_DoubleClick({ Show-MainForm })
 
@@ -2150,11 +2169,7 @@ $numInterval = New-Object System.Windows.Forms.NumericUpDown
 $numInterval.Minimum = 10; $numInterval.Maximum = 600; $numInterval.Value = $Cfg.IntervalSec
 $numInterval.Location = New-Object System.Drawing.Point(520, 334); $numInterval.Size = New-Object System.Drawing.Size(70, 22)
 $tabB.Controls.Add($numInterval)
-
-$chkAutoB = New-Object System.Windows.Forms.CheckBox
-$chkAutoB.Text = '开机自启'; $chkAutoB.Location = New-Object System.Drawing.Point(610, 336); $chkAutoB.AutoSize = $true
-$chkAutoB.Checked = (Get-AutoStart)
-$tabB.Controls.Add($chkAutoB)
+# 「开机自启」复选框自 v1.1.3 起移至「设置」页（与其余偏好设置统一收纳）
 
 $txtLogB = New-Object System.Windows.Forms.TextBox
 $txtLogB.Multiline = $true; $txtLogB.ScrollBars = 'Vertical'; $txtLogB.ReadOnly = $true
@@ -2211,7 +2226,6 @@ $btnGuardB.Add_Click({
 })
 
 $numInterval.Add_ValueChanged({ $Cfg.IntervalSec = [int]$numInterval.Value; Write-Config $Cfg })
-$chkAutoB.Add_CheckedChanged({ if ($Global:AutoBusy) { return }; Invoke-AutoStartToggle -Enable $chkAutoB.Checked })
 
 # --- Tab C: 日志（诊断） ---
 $tabC = New-Object System.Windows.Forms.TabPage; $tabC.Text = '日志（诊断）'
@@ -2404,6 +2418,46 @@ $btnDiagSave.Add_Click({
         Copy-Item -LiteralPath $Global:LastCheckupReport -Destination $dlg.FileName -Force
         $lblDiagSummary.Text = ('报告已另存到 ' + $dlg.FileName)
     }
+})
+
+# --- Tab E: 设置 ---
+$tabE = New-Object System.Windows.Forms.TabPage; $tabE.Text = '设置'
+$tab.Controls.Add($tabE)
+
+# 开机自启（与托盘菜单共用状态；最高权限计划任务方案，勾选时弹一次 UAC 授权）
+$chkAutoB = New-Object System.Windows.Forms.CheckBox
+$chkAutoB.Text = '开机自启（最高权限计划任务，勾选时弹一次管理员授权）'
+$chkAutoB.Location = New-Object System.Drawing.Point(12, 16); $chkAutoB.AutoSize = $true
+$chkAutoB.Checked = (Get-AutoStart)
+$tabE.Controls.Add($chkAutoB)
+
+# 自动检查更新（与托盘菜单共用状态）
+$chkUpdAutoS = New-Object System.Windows.Forms.CheckBox
+$chkUpdAutoS.Text = '自动检查更新（启动后静默检查，发现新版本才提示）'
+$chkUpdAutoS.Location = New-Object System.Drawing.Point(12, 46); $chkUpdAutoS.AutoSize = $true
+$chkUpdAutoS.Checked = [bool]$Cfg.AutoUpdateCheck
+$tabE.Controls.Add($chkUpdAutoS)
+
+$btnCheckUpdS = New-Object System.Windows.Forms.Button
+$btnCheckUpdS.Text = '立即检查更新'; $btnCheckUpdS.Location = New-Object System.Drawing.Point(12, 82); $btnCheckUpdS.Size = New-Object System.Drawing.Size(130, 28)
+$tabE.Controls.Add($btnCheckUpdS)
+
+$btnOpenCfgS = New-Object System.Windows.Forms.Button
+$btnOpenCfgS.Text = '打开配置/报告目录'; $btnOpenCfgS.Location = New-Object System.Drawing.Point(152, 82); $btnOpenCfgS.Size = New-Object System.Drawing.Size(160, 28)
+$tabE.Controls.Add($btnOpenCfgS)
+
+$lblSetHint = New-Object System.Windows.Forms.Label
+$lblSetHint.Text = '提示：轮询间隔在「路线B：IPP 哨兵」页设置；日志与等级筛选在「日志（诊断）」页；深度体检在同名页。'
+$lblSetHint.Location = New-Object System.Drawing.Point(12, 124); $lblSetHint.Size = New-Object System.Drawing.Size(780, 20); $lblSetHint.AutoSize = $false
+$lblSetHint.ForeColor = [System.Drawing.Color]::FromArgb(100, 108, 120)
+$tabE.Controls.Add($lblSetHint)
+
+$chkAutoB.Add_CheckedChanged({ if ($Global:AutoBusy) { return }; Invoke-AutoStartToggle -Enable $chkAutoB.Checked })
+$chkUpdAutoS.Add_CheckedChanged({ if ($Global:UpdAutoBusy) { return }; Set-UpdAutoEnabled $chkUpdAutoS.Checked })
+$btnCheckUpdS.Add_Click({ Invoke-UpdateCheck })
+$btnOpenCfgS.Add_Click({
+    if (-not (Test-Path $ConfigDir)) { New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null }
+    Start-Process 'explorer.exe' $ConfigDir
 })
 
 # 主窗体关闭 -> 最小化到托盘（不退出）
