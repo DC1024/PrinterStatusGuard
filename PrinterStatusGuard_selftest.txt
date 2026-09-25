@@ -21,5 +21,8 @@
 [OK  ] Send-Notification 函数存在 
 [OK  ] Send-Toast 函数存在 
 [OK  ] Read-Config 返回对象 
+[OK  ] Invoke-PrintSubsystemCheckup 函数存在 
+[OK  ] 深度体检 产出报告且含结论段 Flags=0
+[OK  ] 深度体检 报告文件已落盘 
 
 失败用例数: 0

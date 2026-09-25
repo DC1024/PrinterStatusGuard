@@ -258,7 +258,11 @@ footer a{color:#cfe0ff}
       </div>
       <div class="card">
         <h3><span data-lang-zh>自检模式</span><span data-lang-en>Self-test mode</span></h3>
-        <p><span data-lang-zh>无需界面即可验证核心逻辑：<code>PrinterStatusGuard.exe -SelfTest</code>，23 个用例覆盖 IPP 解析、SNMP 位域解码、双通道合并、迟滞防抖、注册表路径构造。</span><span data-lang-en>Verify the core logic headlessly with <code>PrinterStatusGuard.exe -SelfTest</code> — 23 cases covering IPP parsing, SNMP bit-field decoding, channel merging, hysteresis and registry path construction.</span></p>
+<p><span data-lang-zh>无需界面即可验证核心逻辑：<code>PrinterStatusGuard.exe -SelfTest</code>，26 个用例覆盖 IPP 解析、SNMP 位域解码、双通道合并、迟滞防抖、注册表路径构造与深度体检全流程。</span><span data-lang-en>Verify the core logic headlessly with <code>PrinterStatusGuard.exe -SelfTest</code> — 26 cases covering IPP parsing, SNMP bit-field decoding, channel merging, hysteresis, registry path construction and a full deep-checkup run.</span></p>
+      </div>
+      <div class="card">
+        <h3><span data-lang-zh>深度体检</span><span data-lang-en>Deep checkup</span></h3>
+        <p><span data-lang-zh>原独立工具 WinPrintDiag 已并入本程序：一键只读扫描打印服务、崩溃历史、组件签名、打印机-驱动配对（重复条目/错配判定）、队列堆积与审计日志，产出可另存的诊断报告；管理员可一键从组件存储还原被替换的组件。</span><span data-lang-en>WinPrintDiag is now built in: a one-click read-only scan of the whole print subsystem — Spooler state, spoolsv crash history, binary signature integrity, printer/driver pairing (duplicates &amp; mismatches), queue backlog and audit-log status. Admin can restore suspect binaries from WinSxS. The standalone winprintdiag repo is archived.</span></p>
       </div>
       <div class="card">
         <h3><span data-lang-zh>真正免安装</span><span data-lang-en>Truly portable</span></h3>

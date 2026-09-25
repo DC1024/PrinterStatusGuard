@@ -7,6 +7,8 @@
 
 两条路线互补：A 让系统自己显示状态，B 在系统看不到的时候（很多打印机不回 SNMP / IPP 不全）仍能主动告警。
 
+v1.1.0 起，原独立工具 **WinPrintDiag**（打印子系统体检，原仓库 [DC1024/winprintdiag](https://github.com/DC1024/winprintdiag)，已归档）**整体并入本程序**，成为主界面的「深度体检」标签页。
+
 > 为什么需要它：打印机卡纸、缺纸时，Windows 默认经常「哑巴」——打印任务卡住、用户跑到打印机前才发现。本工具把状态主动推到桌面通知。
 
 ---
@@ -15,10 +17,11 @@
 
 1. 拿到 `PrinterStatusGuard.exe`（已编译好的单文件，**免安装**，放到任意目录双击即可）。
 2. 也可以运行 `PrinterStatusGuard.cmd` 启动器：优先用同目录的 `.exe`，找不到时自动回退到 `.ps1`（需要本机有 PowerShell 5.1）。
-3. 主界面有三个标签页：
+3. 主界面有四个标签页：
    - **路线 A：启用端口 SNMP** —— 选中打印机的 TCP/IP 端口，点「启用选中端口 SNMP」。需要**管理员权限**（工具会弹 UAC 提权窗口）。开启后 Windows 原生即显示缺纸 / 缺墨。
    - **路线 B：IPP 哨兵** —— 点「添加当前网络打印机」自动导入本机已安装的网络打印机，设置轮询间隔（秒），勾选「开机自启」，点「开始哨兵」。异常时弹桌面通知。
    - **日志（诊断）** —— 查看工具与打印机之间的所有交互消息，支持 `全部 / Info / Warning / Error` 等级筛选、清空、打开日志目录。
+   - **深度体检** —— 一键扫描打印子系统（源自 WinPrintDiag），见下文「深度体检」。
 4. 关闭主窗口会**最小化到托盘**而非退出；右键托盘图标可「显示主窗口 / 开始哨兵 / 开机自启 / 退出」。
    > ⚠️ 更新/替换 exe 前：**最小化到托盘不等于退出**，进程仍在运行会占用 `PrinterStatusGuard.exe`，导致文件无法覆盖（报"文件被占用"）。
    > 请先右键托盘图标 → **退出**（或任务管理器结束该进程），确认进程消失后再替换 exe。
@@ -92,6 +95,19 @@ HKLM\SYSTEM\CurrentControlSet\Control\Print\Monitors\Standard TCP/IP Port\Ports\
 
 ---
 
+## 深度体检（WinPrintDiag 并入）
+
+v1.1.0 起，原独立工具 WinPrintDiag 的**完整体检逻辑**并入主程序，成为「深度体检」标签页（不再需要单独下载运行）：
+
+- **一键只读扫描**（约 5 秒）：打印服务状态、spoolsv 崩溃历史（应用日志 1000 / SCM 7031·7034）、打印组件文件签名完好性、打印机/端口/驱动配对（含**同一台打印机重复注册多条目**判定与「建议保留 / 建议删除」、USB 端口挂 IPP 类驱动错配）、打印队列堆积、近期补丁/软件/意外关机、打印审计日志开关。
+- **报告**：等宽字体展示，自动落盘到 `%APPDATA%\PrinterStatusGuard\checkup\PrinterCheckup_YYYYMMDD_HHMMSS.txt`（UTF-8 BOM），支持「另存报告」「打开报告目录」。
+- **修复组件（管理员）**：对签名异常的系统打印组件，从组件存储（WinSxS）还原，旧文件先隔离备份。
+- **清理打印队列**：把卡住的队列文件移到带时间戳的备份目录（不删除任何文件），需管理员。
+
+历史记录：原 [DC1024/winprintdiag](https://github.com/DC1024/winprintdiag) 仓库已归档，其功能全部由本仓库继续提供。
+
+---
+
 ## 自测 / 校验
 
 无需界面即可验证核心逻辑（IPP 解析、SNMP 解码、状态合并、防抖迟滞、注册表路径构造、关键函数存在性）：
@@ -102,12 +118,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File PrinterStatusGuard.ps1 -Self
 PrinterStatusGuard.exe -SelfTest
 ```
 
-结果写入同目录 `PrinterStatusGuard_selftest.txt`，`失败用例数: 0` 即通过。当前覆盖 23 个用例，含：
+结果写入同目录 `PrinterStatusGuard_selftest.txt`，`失败用例数: 0` 即通过。当前覆盖 26 个用例，含：
 
 - IPP `printer-state-reasons` 映射与 `printer-state` 解析
 - SNMP `hrPrinterDetectedErrorState` OCTET STRING 解码（含单 bit `0x04 → 定影器过热`、多 bit、ErrStatus=0）
 - `Merge-PrinterStatus` 双通道合并（正常+过热→Warning、卡纸→Critical、全正常→OK、厂商自定义位→Warning 不漏报）
 - 防抖迟滞（异常去重、恢复需连续 3 次、离线需连续 3 次、抖动不刷屏）
+- 深度体检全流程（真实扫描一次：产出报告、含结论段、文件落盘）
 - 端口 SNMP 注册表路径构造、`Send-Notification` / `Send-Toast` / `Read-Config` 存在性
 
 重新编译（需先有 `ps2exe` 模块）：
@@ -145,11 +162,12 @@ A **portable, single-file** Windows utility combining two ways to get printer st
 ## Usage
 
 1. Run `PrinterStatusGuard.exe` (portable, no install). Or `PrinterStatusGuard.cmd` (launches the exe, falls back to the `.ps1` if absent).
-2. Tab **Route A**: select a TCP/IP port → *Enable SNMP* (UAC prompt). Tab **Route B**: *Add current network printers* → set interval → *Start sentinel*; close-to-tray, right-click tray icon to quit. Tab **Log (Diagnostics)**: view all tool↔printer messages with `All / Info / Warning / Error` level filter, clear, and open-log-dir.
-3. Self-test: `PrinterStatusGuard.exe -SelfTest` writes `PrinterStatusGuard_selftest.txt` (`失败用例数: 0` = pass). 23 cases cover IPP parse, SNMP decode, `Merge-PrinterStatus`, hysteresis, registry path, key functions.
+2. Tab **Route A**: select a TCP/IP port → *Enable SNMP* (UAC prompt). Tab **Route B**: *Add current network printers* → set interval → *Start sentinel*; close-to-tray, right-click tray icon to quit. Tab **Log (Diagnostics)**: view all tool↔printer messages with `All / Info / Warning / Error` level filter, clear, and open-log-dir. Tab **Deep Checkup** (v1.1.0, merged from WinPrintDiag): one-click read-only scan of the whole print subsystem.
+3. Self-test: `PrinterStatusGuard.exe -SelfTest` writes `PrinterStatusGuard_selftest.txt` (`失败用例数: 0` = pass). 26 cases cover IPP parse, SNMP decode, `Merge-PrinterStatus`, hysteresis, registry path, key functions, and a **full deep-checkup run**.
 
 ## Notes
 
+- **Deep Checkup (merged from WinPrintDiag since v1.1.0):** a one-click read-only scan (~5 s) covering Spooler service state, spoolsv crash history (Event 1000 / SCM 7031·7034), print-stack file signature integrity, printer/port/driver pairing (duplicate entries for the same physical printer with keep/remove advice, USB port on IPP class-driver mismatch), queue backlog, recent patches/software/unexpected shutdowns, and the print audit-log switch. Reports are saved to `%APPDATA%\PrinterStatusGuard\checkup\` and can be saved elsewhere. Admin buttons: *Repair components* (restore suspect print binaries from WinSxS, quarantining originals first) and *Clear print queue* (moves stuck jobs to a timestamped backup folder — nothing is deleted). The standalone repo [DC1024/winprintdiag](https://github.com/DC1024/winprintdiag) is archived; this repo now provides all of its functionality.
 - SNMP (RFC 2790) covers empty trays / missing supplies but **not jams**; IPP covers jams. Route B now **merges both channels** (`Merge-PrinterStatus`) so a jam from IPP and a vendor bit from SNMP are never dropped or double-reported.
 - **Hysteresis (debounce):** printers briefly drop IPP/SNMP during scanning/printing/sleep, which used to spam "recovered". Anomaly fires immediately (deduped); *offline* and *recovered* each require **3 consecutive stable polls** before firing, so a scan-induced blip no longer floods notifications.
 - Log tab writes both an in-memory ring buffer (3000) and daily files at `%APPDATA%\PrinterStatusGuard\logs\app-YYYY-MM-DD.log`.

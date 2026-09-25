@@ -6,7 +6,7 @@ $src  = Join-Path $ScriptDir 'PrinterStatusGuard.ps1'
 $exe  = Join-Path $ScriptDir 'PrinterStatusGuard.exe'
 $cmd  = Join-Path $ScriptDir 'PrinterStatusGuard.cmd'
 $ico  = Join-Path $ScriptDir 'app.ico'
-$ver  = '0.1.0'
+$ver  = '1.1.0'
 
 if (-not (Test-Path $src)) { throw "找不到源文件: $src" }
 
@@ -32,7 +32,7 @@ $params = @{
     noConsole   = $true
     x64         = $true
     title       = 'PrinterStatusGuard 打印机状态守护'
-    description = '路线A 启用端口SNMP + 路线B IPP哨兵常驻，免安装单文件工具'
+    description = '打印机状态守护（SNMP+IPP 双通道）+ 打印子系统深度体检，免安装单文件工具'
     company     = 'DC1024'
     product     = 'PrinterStatusGuard'
     copyright   = '(c) DC1024'
